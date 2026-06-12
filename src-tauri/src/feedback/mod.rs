@@ -180,6 +180,13 @@ pub struct SettingsSnapshot {
     pub deepseek_api_key: String,
     pub deepseek_endpoint: Option<String>,
     pub deepseek_verified: bool,
+    /// 2026-06-12 V0.3.14:云端 LLM 后端("deepseek" / "minimax"),在 feedback 报告里告诉作者
+    /// 用户当前用的是什么。
+    pub cloud_llm_backend: String,
+    /// 2026-06-12 V0.3.14:MiniMax key 状态(MiniMax 后端时才有意义)。
+    pub minimax_api_key: String,
+    pub minimax_endpoint: Option<String>,
+    pub minimax_verified: bool,
     pub yuandian_api_key: String,
     pub yuandian_verified: bool,
     pub local_model_dir: Option<String>,
@@ -288,6 +295,11 @@ fn build_settings_snapshot(s: &crate::settings::Settings) -> SettingsSnapshot {
         deepseek_api_key: key_status(&s.cloud_llm_api_key),
         deepseek_endpoint: s.cloud_llm_endpoint.as_deref().map(strip_endpoint_auth),
         deepseek_verified: s.deepseek_verified_at.is_some(),
+        // 2026-06-12 V0.3.14:双后端时各填各的 key 状态(永远显示两个,反映实际配置情况)
+        cloud_llm_backend: s.effective_cloud_llm_backend().to_string(),
+        minimax_api_key: key_status(&s.minimax_api_key),
+        minimax_endpoint: s.minimax_endpoint.as_deref().map(strip_endpoint_auth),
+        minimax_verified: s.minimax_verified_at.is_some(),
         yuandian_api_key: key_status(&s.yuandian_api_key),
         yuandian_verified: s.yuandian_verified_at.is_some(),
         local_model_dir: s.local_model_dir.clone(),
@@ -438,12 +450,18 @@ pub async fn collect(
         "未启用(走云端)".to_string()
     };
 
-    // DeepSeek 余额(只读缓存,不发请求 — 反馈对话框不该慢)
-    let deepseek_balance = crate::deepseek::cached_balance(pool)
-        .await
-        .ok()
-        .flatten()
-        .map(|b| b.total_balance);
+    // 2026-06-12 V0.3.14:DeepSeek 余额(只读缓存,不发请求)。
+    // 切到 minimax 后本字段永远 None(读到的 deepseek DB 缓存对当前后端无意义,直接 None
+    // 避免反馈报告里出现误导性的旧余额数字)。
+    let deepseek_balance = if settings.effective_cloud_llm_backend() == "deepseek" {
+        crate::deepseek::cached_balance(pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|b| b.total_balance)
+    } else {
+        None
+    };
 
     // 统计
     let cases_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cases")

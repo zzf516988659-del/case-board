@@ -37,6 +37,7 @@ import {
   saveSettings,
   testMcpServer,
   verifyDeepSeekKey,
+  verifyMiniMaxKey, // 2026-06-12 V0.3.14
   verifyMinerUKey,
   verifyPaddleVlKey,
   verifyEmbeddingKey,
@@ -102,6 +103,9 @@ export function SettingsModal({
   const [paddleMsg, setPaddleMsg] = useState<string>("");
   const [deepseekStatus, setDeepseekStatus] = useState<VerifyStatus>("idle");
   const [deepseekMsg, setDeepseekMsg] = useState<string>("");
+  // 2026-06-12 V0.3.14 · MiniMax API key 验证状态
+  const [minimaxStatus, setMiniMaxStatus] = useState<VerifyStatus>("idle");
+  const [minimaxMsg, setMiniMaxMsg] = useState<string>("");
   // 2026-05-25 V0.1.8 · 元典 API key 在线验证状态
   const [yuandianStatus, setYuandianStatus] = useState<VerifyStatus>("idle");
   const [yuandianMsg, setYuandianMsg] = useState<string>("");
@@ -119,6 +123,9 @@ export function SettingsModal({
     }
     if (settings.deepseek_verified_at && deepseekStatus === "idle") {
       setDeepseekStatus("ok");
+    }
+    if (settings.minimax_verified_at && minimaxStatus === "idle") {
+      setMiniMaxStatus("ok");
     }
     if (settings.yuandian_verified_at && yuandianStatus === "idle") {
       setYuandianStatus("ok");
@@ -213,6 +220,36 @@ export function SettingsModal({
       setDeepseekStatus("fail");
       setDeepseekMsg(String(e));
       updateField("deepseek_verified_at", null);
+    }
+  }
+
+  // 2026-06-12 V0.3.14:验证 MiniMax API key(走 /v1/models 标准端点)
+  async function handleVerifyMiniMax() {
+    if (!settings?.minimax_api_key?.trim()) {
+      setMiniMaxStatus("fail");
+      setMiniMaxMsg("请先填入 API Key");
+      return;
+    }
+    setMiniMaxStatus("verifying");
+    setMiniMaxMsg("");
+    try {
+      const r = await verifyMiniMaxKey(
+        settings.minimax_api_key,
+        settings.minimax_endpoint ?? undefined,
+      );
+      if (r.ok) {
+        setMiniMaxStatus("ok");
+        setMiniMaxMsg("");
+        updateField("minimax_verified_at", new Date().toISOString());
+      } else {
+        setMiniMaxStatus("fail");
+        setMiniMaxMsg(r.message);
+        updateField("minimax_verified_at", null);
+      }
+    } catch (e) {
+      setMiniMaxStatus("fail");
+      setMiniMaxMsg(String(e));
+      updateField("minimax_verified_at", null);
     }
   }
 
@@ -557,6 +594,40 @@ export function SettingsModal({
                   </Section>
 
                   <Section
+                    title="云端 LLM 后端"
+                    desc="选择用哪个云端大模型服务。切换后该后端的 key/endpoint/模型档位会生效,另一个继续保留(随时切回)。"
+                  >
+                    <Field label="后端选择">
+                      <select
+                        value={
+                          (settings.cloud_llm_backend as
+                            | "deepseek"
+                            | "minimax"
+                            | null) ?? "deepseek"
+                        }
+                        onChange={(e) =>
+                          updateField(
+                            "cloud_llm_backend",
+                            e.target.value || null,
+                          )
+                        }
+                        className={inputCls}
+                      >
+                        <option value="deepseek">
+                          DeepSeek(V0.3 官方推荐 · 默认)
+                        </option>
+                        <option value="minimax">
+                          MiniMax(2026-06-12 V0.3.14 接入 · OpenAI 兼容)
+                        </option>
+                      </select>
+                      <p className="mt-1 text-label text-muted-foreground">
+                        两个后端的 key 独立保存,切换不会清空对方。首次切换后
+                        记得点「验证」确认新后端连通。
+                      </p>
+                    </Field>
+                  </Section>
+
+                  <Section
                     title="DeepSeek"
                     link={{
                       label: "点这里申请 API Key",
@@ -637,6 +708,101 @@ export function SettingsModal({
                     </Field>
                     {/* Endpoint 默认 https://api.deepseek.com,改了反而可能用不了 → 不暴露输入框,
                         cloud_llm_endpoint 留 null,后端按默认走。 */}
+                  </Section>
+
+                  <Section
+                    title="MiniMax(2026-06-12 V0.3.14 接入)"
+                    link={{
+                      label: "点这里申请 MiniMax API Key",
+                      href: "https://api.minimaxi.com/user-center/basic-information/interface-key",
+                    }}
+                  >
+                    <Field label="API Key">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="password"
+                          value={settings.minimax_api_key ?? ""}
+                          onChange={(e) => {
+                            updateField(
+                              "minimax_api_key",
+                              e.target.value || null,
+                            );
+                            if (minimaxStatus !== "idle") {
+                              setMiniMaxStatus("idle");
+                              setMiniMaxMsg("");
+                              updateField("minimax_verified_at", null);
+                            }
+                          }}
+                          placeholder="eyJ... 或 sk-..."
+                          className={cn(inputCls, "flex-1")}
+                          autoComplete="off"
+                        />
+                        <VerifyStatusIcon status={minimaxStatus} />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="disabled:cursor-not-allowed"
+                          onClick={handleVerifyMiniMax}
+                          disabled={
+                            minimaxStatus === "verifying" ||
+                            !settings.minimax_api_key?.trim()
+                          }
+                        >
+                          {minimaxStatus === "verifying" ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            "验证"
+                          )}
+                        </Button>
+                      </div>
+                      {minimaxStatus === "fail" && minimaxMsg && (
+                        <p className="mt-1.5 text-xs text-red-600">
+                          ✗ {minimaxMsg}
+                        </p>
+                      )}
+                      {minimaxStatus === "ok" && (
+                        <p className="mt-1.5 text-xs text-green-700">
+                          ✓ 已验证通过,可以使用
+                        </p>
+                      )}
+                      <p className="mt-1 text-label text-muted-foreground">
+                        MiniMax 无公开余额查询端点,验证仅确认 key 能用。
+                      </p>
+                    </Field>
+                    <Field label="Endpoint">
+                      <input
+                        type="text"
+                        value={settings.minimax_endpoint ?? ""}
+                        onChange={(e) =>
+                          updateField(
+                            "minimax_endpoint",
+                            e.target.value || null,
+                          )
+                        }
+                        placeholder="https://api.minimaxi.com(默认)"
+                        className={inputCls}
+                      />
+                    </Field>
+                    <Field label="模型档位">
+                      <select
+                        value={settings.minimax_model ?? "minimax-M2.7"}
+                        onChange={(e) =>
+                          updateField("minimax_model", e.target.value || null)
+                        }
+                        className={inputCls}
+                      >
+                        <option value="minimax-M2.7">
+                          M2.7 · 轻量档(快 + 便宜,推荐日常)
+                        </option>
+                        <option value="minimax-M3">
+                          M3 · 强推理档(默认开思考,贵但准)
+                        </option>
+                        <option value="auto">
+                          自动挡 · 短问 M2.7、长问 + 推理关键词 M3
+                        </option>
+                      </select>
+                    </Field>
                   </Section>
                 </>
 

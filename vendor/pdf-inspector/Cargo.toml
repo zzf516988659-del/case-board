@@ -1,0 +1,58 @@
+[package]
+name = "pdf-inspector"
+version = "0.1.0"
+edition = "2021"
+autobins = false
+authors = ["Firecrawl Team"]
+description = "Fast PDF inspection, classification, and text extraction with smart scanned vs text-based detection"
+license = "MIT"
+repository = "https://github.com/firecrawl/pdf-inspector"
+
+[lib]
+name = "pdf_inspector"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+# Python bindings
+pyo3 = { version = "0.25", features = ["extension-module"], optional = true }
+
+# PDF parsing
+# 2026-06-12 V0.3.14:从 git dep 改 path 指向 vendor/lopdf(本地环境 github.com git 协议不稳)
+lopdf = { path = "../lopdf", features = ["rayon"] }
+
+# Error handling
+thiserror = "2.0"
+
+# Parallel processing
+rayon = "1.10"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Text processing
+regex = "1.10"
+once_cell = "1.19"
+unicode-normalization = "0.1"
+
+# TrueType font parsing (for Identity-H CID font cmap extraction)
+ttf-parser = "0.25"
+
+[dev-dependencies]
+tempfile = "3.3"
+
+[features]
+default = []
+python = ["pyo3"]
+
+[[bin]]
+name = "pdf2md"
+path = "src/bin/pdf2md.rs"
+
+[[bin]]
+name = "detect-pdf"
+path = "src/bin/detect_pdf.rs"
+
+[[bin]]
+name = "dump_ops"
+path = "src/bin/dump_ops.rs"

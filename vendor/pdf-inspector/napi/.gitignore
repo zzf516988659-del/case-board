@@ -1,0 +1,6 @@
+target/
+node_modules/
+*.node
+
+# Override root .gitignore — lock file needed for reproducible napi builds
+!Cargo.lock

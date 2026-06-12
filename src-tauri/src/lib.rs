@@ -443,6 +443,12 @@ async fn verify_deepseek_key(api_key: String, endpoint: Option<String>) -> verif
     verify::verify_deepseek_key(&api_key, endpoint.as_deref()).await
 }
 
+/// 2026-06-12 V0.3.14 · 验证 MiniMax API key(OpenAI 兼容 /v1/models 端点)。
+#[tauri::command]
+async fn verify_minimax_key(api_key: String, endpoint: Option<String>) -> verify::VerifyResult {
+    verify::verify_minimax_key(&api_key, endpoint.as_deref()).await
+}
+
 /// 2026-05-25 V0.1.8 · 验证元典(open.chineselaw.com)API key,前端「验证」按钮触发。
 #[tauri::command]
 async fn verify_yuandian_key(api_key: String) -> verify::VerifyResult {
@@ -945,6 +951,8 @@ async fn send_feedback_email(
 /// `refresh = true`:发请求拉新数据,落 DB 快照;失败返回错误
 /// `refresh = false`:只读 DB 缓存(立即返回,不发请求);无缓存时返回 None
 ///
+/// 2026-06-12 V0.3.14:仅当 `settings.effective_cloud_llm_backend() == "deepseek"` 时真发请求;
+/// 切到 MiniMax 后本接口恒返回 Ok(None),DeepSeek 余额模块代码保留空壳,后续切回再激活。
 /// 仅在 settings.effective_llm_provider() == "cloud" + 有 api_key 时有意义,
 /// 前端调用前自己判断(本 command 不做 provider 校验,api_key 缺失时返回 NoApiKey 错误)。
 #[tauri::command]
@@ -952,8 +960,16 @@ async fn get_deepseek_balance(
     pool: tauri::State<'_, SqlitePool>,
     refresh: bool,
 ) -> Result<Option<deepseek::DeepSeekBalance>, String> {
+    // 2026-06-12 V0.3.14:后端非 deepseek → 走空壳,不发请求不读 DB
+    let settings = settings::read_settings().unwrap_or_default();
+    if settings.effective_cloud_llm_backend() != "deepseek" {
+        eprintln!(
+            "[INFO] get_deepseek_balance: 后端 = {},跳过 deepseek 余额查询(走空壳)",
+            settings.effective_cloud_llm_backend()
+        );
+        return Ok(None);
+    }
     if refresh {
-        let settings = settings::read_settings().unwrap_or_default();
         let Some(api_key) = settings.cloud_llm_api_key.as_deref() else {
             return Err("尚未配置 DeepSeek API key".into());
         };
@@ -964,6 +980,21 @@ async fn get_deepseek_balance(
     } else {
         deepseek::cached_balance(pool.inner()).await.map_err(db_err)
     }
+}
+
+/// 2026-06-12 V0.3.14:MiniMax 余额查询空壳。
+///
+/// MiniMax 公开 API 没有公开余额查询端点(DeepSeek 有 `/user/balance`,MiniMax 没有等价物),
+/// 所以本接口恒返回 Ok(None)。前端调用是 no-op,显示「MiniMax 无公开余额端点」。
+/// 若后续 MiniMax 上线公开余额端点,在这里接实现即可(参考 deepseek::fetch_balance_and_persist)。
+#[tauri::command]
+async fn get_minimax_balance(
+    _pool: tauri::State<'_, SqlitePool>,
+    _refresh: bool,
+) -> Result<Option<deepseek::DeepSeekBalance>, String> {
+    // 复用 DeepSeekBalance 结构体占位(MiniMax 字段子集),后续真有余额再独立 struct。
+    eprintln!("[INFO] get_minimax_balance: MiniMax 暂无公开余额端点,返回 None");
+    Ok(None)
 }
 
 /// 2026-05-24 e:手工覆盖案件工作流状态(看板卡片右上角的 chip)。
@@ -2267,12 +2298,14 @@ pub fn run() {
             update_workflow_status,
             update_case_overrides,
             get_deepseek_balance,
+            get_minimax_balance, // 2026-06-12 V0.3.14
             collect_feedback_diagnostic,
             save_feedback_md,
             send_feedback_email,
             verify_mineru_key,
             verify_paddle_vl_key,
             verify_deepseek_key,
+            verify_minimax_key, // 2026-06-12 V0.3.14
             verify_yuandian_key,
             check_for_update,
             app_version,

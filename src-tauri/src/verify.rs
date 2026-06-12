@@ -177,6 +177,67 @@ pub async fn verify_deepseek_key(api_key: &str, endpoint: Option<&str>) -> Verif
     ))
 }
 
+/// 2026-06-12 V0.3.14:验证 MiniMax API key(OpenAI 兼容标准端点)。
+///
+/// 走 `GET {endpoint}/v1/models` 看 200。MiniMax 没有 `/user/balance` 这种余额端点
+/// (公开文档没有,跟 DeepSeek 不同),用 OpenAI 标准的 `/v1/models` 鉴权。
+pub async fn verify_minimax_key(api_key: &str, endpoint: Option<&str>) -> VerifyResult {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return VerifyResult::fail("API Key 为空");
+    }
+    // MiniMax key 格式不一(JWT / sk-eyJ... / 自定义),不强制前缀,长度 >= 8 即可
+    if api_key.len() < 8 {
+        return VerifyResult::fail("API Key 太短(小于 8 位),可能填错了");
+    }
+
+    let base = endpoint
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://api.minimaxi.com");
+    let base = base.trim_end_matches('/');
+    // 用户可能只填 base URL,也可能填到 /v1,统一补 /v1/models
+    let base = if base.ends_with("/v1") || base.contains("/v1/") {
+        base.to_string()
+    } else {
+        format!("{}/v1", base)
+    };
+    let url = format!("{}/models", base);
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return VerifyResult::fail(format!("HTTP 客户端创建失败: {}", e)),
+    };
+
+    let resp = match client
+        .get(&url)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return VerifyResult::fail(format!("网络错误: {}", e)),
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        return VerifyResult::ok();
+    }
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return VerifyResult::fail("API Key 无效或已过期");
+    }
+    let body = resp.text().await.unwrap_or_default();
+    VerifyResult::fail(format!(
+        "HTTP {} · {}",
+        status.as_u16(),
+        body.chars().take(200).collect::<String>()
+    ))
+}
+
 /// 验证元典(open.chineselaw.com)API key。
 ///
 /// 两段探测:

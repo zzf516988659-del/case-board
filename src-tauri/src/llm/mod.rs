@@ -250,13 +250,20 @@ impl LlmConfig {
     /// 从用户 Settings 构造 LlmConfig,根据 `effective_llm_provider()` 自动选本机 / 云端。
     ///
     /// 2026-05-23 晚六:LLM 单独维度,跟 OCR 解耦。
+    /// 2026-06-12 V0.3.14:云端模式下,根据 `settings.effective_cloud_llm_backend()`
+    /// 在 deepseek 和 minimax 之间选不同的 endpoint / 模型 / api_key。
     pub fn from_settings(settings: &crate::settings::Settings) -> Self {
         if settings.effective_llm_provider() == "cloud" {
-            // 云端模式:用 cloud_llm_* 字段。endpoint 自动补 /v1/chat/completions(DeepSeek 兼容 OpenAI 协议)
+            // 2026-06-12 V0.3.14:云端后端由 settings.effective_cloud_llm_backend() 决定。
+            // 老逻辑(只支持 deepseek)依然能用,只是字段来源切到 effective_* getter。
+            let backend = settings.effective_cloud_llm_backend();
+            let default_endpoint = match backend {
+                "minimax" => "https://api.minimaxi.com",
+                _ => "https://api.deepseek.com",
+            };
             let endpoint = settings
-                .cloud_llm_endpoint
-                .clone()
-                .unwrap_or_else(|| "https://api.deepseek.com".to_string());
+                .effective_cloud_llm_endpoint()
+                .unwrap_or_else(|| default_endpoint.to_string());
             // 用户填 endpoint 时可能只填 base URL,我们自动补 /v1/chat/completions
             let endpoint = if endpoint.ends_with("/v1/chat/completions") {
                 endpoint
@@ -265,17 +272,22 @@ impl LlmConfig {
             } else {
                 format!("{}/v1/chat/completions", endpoint)
             };
-            // cloud_llm_model 现在是「档位」:flash / pro / pro-thinking / 'auto'。
-            // 'auto'(自动挡)不是合法 API 模型名 → 基础 config 落 flash(具体每次调用的模型
-            // 由 model_router::route_model 决定并覆盖 LlmConfig.model,见 chat/commands.rs)。
-            let base_model = match settings.cloud_llm_model.as_deref().map(str::trim) {
-                Some("auto") | Some("") | None => "deepseek-v4-flash".to_string(),
+            // cloud_llm_model 现在是「档位」:flash / pro / pro-thinking / 'auto'(deepseek)
+            // 或 minimax-M2.7 / minimax-M3 / 'auto'(minimax)。
+            // 'auto'(自动挡)不是合法 API 模型名 → 基础 config 落 backend 默认(具体每次
+            // 调用的模型由 model_router::route_model 决定并覆盖 LlmConfig.model,见 chat/commands.rs)。
+            let default_model = match backend {
+                "minimax" => "minimax-M2.7",
+                _ => "deepseek-v4-flash",
+            };
+            let base_model = match settings.effective_cloud_llm_model().as_deref().map(str::trim) {
+                Some("auto") | Some("") | None => default_model.to_string(),
                 Some(m) => m.to_string(),
             };
             Self {
                 endpoint,
                 model: base_model,
-                api_key: settings.cloud_llm_api_key.clone(),
+                api_key: settings.effective_cloud_llm_api_key(),
                 timeout_secs: 60, // 云端比本机快,60s 足够;本机要 180s
             }
         } else {

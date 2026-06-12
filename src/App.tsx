@@ -210,8 +210,10 @@ function App() {
     getSettings()
       .then((s) => {
         setUserDisplayName(s.user_display_name);
-        const hasDeepSeekKey =
-          !!s.cloud_llm_api_key && s.cloud_llm_api_key.trim().length > 0;
+        // 2026-06-12 V0.3.14:按当前 backend 判
+        const backend = (s.cloud_llm_backend as "deepseek" | "minimax" | null) ?? "deepseek";
+        const activeKey = backend === "minimax" ? s.minimax_api_key : s.cloud_llm_api_key;
+        const hasDeepSeekKey = !!activeKey && activeKey.trim().length > 0;
         setShowDeepSeekChip(hasDeepSeekKey);
       })
       .catch(console.error);
@@ -323,21 +325,31 @@ function App() {
     const issues: Issue[] = [];
 
     {
-      const filled = !!s.mineru_api_key?.trim();
-      const verified = !!s.mineru_verified_at;
+      // 2026-06-12 V0.3.14:按当前 backend 判
+      const backend = (s.cloud_llm_backend as "deepseek" | "minimax" | null) ?? "deepseek";
+      const activeKey = backend === "minimax" ? s.minimax_api_key : s.cloud_llm_api_key;
+      const activeVerified = backend === "minimax" ? s.minimax_verified_at : s.deepseek_verified_at;
+      const backendLabel = backend === "minimax" ? "MiniMax" : "DeepSeek";
+      const filled = !!activeKey?.trim();
+      const verified = !!activeVerified;
       if (!filled) {
-        issues.push({ label: "MinerU API Token(云端 OCR)", reason: "missing" });
+        issues.push({ label: `${backendLabel} API Key(云端 LLM)`, reason: "missing" });
       } else if (!verified) {
-        issues.push({ label: "MinerU API Token(云端 OCR)", reason: "unverified" });
+        issues.push({ label: `${backendLabel} API Key(云端 LLM)`, reason: "unverified" });
       }
     }
     {
-      const filled = !!s.cloud_llm_api_key?.trim();
-      const verified = !!s.deepseek_verified_at;
+      // 2026-06-12 V0.3.14:按当前 backend 判
+      const backend = (s.cloud_llm_backend as "deepseek" | "minimax" | null) ?? "deepseek";
+      const activeKey = backend === "minimax" ? s.minimax_api_key : s.cloud_llm_api_key;
+      const activeVerified = backend === "minimax" ? s.minimax_verified_at : s.deepseek_verified_at;
+      const backendLabel = backend === "minimax" ? "MiniMax" : "DeepSeek";
+      const filled = !!activeKey?.trim();
+      const verified = !!activeVerified;
       if (!filled) {
-        issues.push({ label: "DeepSeek API Key(云端 LLM)", reason: "missing" });
+        issues.push({ label: `${backendLabel} API Key(云端 LLM)`, reason: "missing" });
       } else if (!verified) {
-        issues.push({ label: "DeepSeek API Key(云端 LLM)", reason: "unverified" });
+        issues.push({ label: `${backendLabel} API Key(云端 LLM)`, reason: "unverified" });
       }
     }
 

@@ -30,6 +30,7 @@ import {
   openUrl,
   verifyMinerUKey,
   verifyDeepSeekKey,
+  verifyMiniMaxKey, // 2026-06-12 V0.3.14
   verifyYuandianKey,
   seedDemoCaseIfEmpty,
 } from "@/lib/api";
@@ -189,12 +190,19 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
   const [minerKey, setMinerKey] = useState("");
   const [dsKey, setDsKey] = useState("");
   const [dsEndpoint, setDsEndpoint] = useState("https://api.deepseek.com");
+  // 2026-06-12 V0.3.14:MiniMax key(独立字段)
+  const [mmKey, setMmKey] = useState("");
+  const [mmEndpoint, setMmEndpoint] = useState("https://api.minimaxi.com");
+  const [llmBackend, setLlmBackend] = useState<"deepseek" | "minimax">("deepseek");
   const [yuandianKey, setYuandianKey] = useState("");
 
   const [mineruStatus, setMineruStatus] = useState<VerifyStatus>("idle");
   const [mineruMsg, setMineruMsg] = useState("");
   const [deepseekStatus, setDeepseekStatus] = useState<VerifyStatus>("idle");
   const [deepseekMsg, setDeepseekMsg] = useState("");
+  // 2026-06-12 V0.3.14:MiniMax 验证状态
+  const [minimaxStatus, setMiniMaxStatus] = useState<VerifyStatus>("idle");
+  const [minimaxMsg, setMiniMaxMsg] = useState("");
   const [yuandianStatus, setYuandianStatus] = useState<VerifyStatus>("idle");
   const [yuandianMsg, setYuandianMsg] = useState("");
 
@@ -207,6 +215,10 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
         if (s.mineru_api_key) setMinerKey(s.mineru_api_key);
         if (s.cloud_llm_api_key) setDsKey(s.cloud_llm_api_key);
         if (s.cloud_llm_endpoint) setDsEndpoint(s.cloud_llm_endpoint);
+        // 2026-06-12 V0.3.14:加载后端选择 + MiniMax 字段
+        if (s.cloud_llm_backend === "minimax") setLlmBackend("minimax");
+        if (s.minimax_api_key) setMmKey(s.minimax_api_key);
+        if (s.minimax_endpoint) setMmEndpoint(s.minimax_endpoint);
         if (s.yuandian_api_key) setYuandianKey(s.yuandian_api_key);
       })
       .catch(console.error);
@@ -214,8 +226,11 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
 
   if (!open) return null;
 
-  // DeepSeek key 是核心,必填才能「开始使用」;MinerU / 元典 推荐填但可「稍后」。
-  const canFinish = dsKey.trim().length > 0;
+  // 2026-06-12 V0.3.14:DeepSeek 或 MiniMax 任一填了 key 就能「开始使用」;
+  // 后端选择决定哪个 key 生效。MinerU / 元典 推荐填但可「稍后」。
+  const canFinish =
+    (llmBackend === "minimax" && mmKey.trim().length > 0) ||
+    (llmBackend === "deepseek" && dsKey.trim().length > 0);
 
   async function handleVerifyMineru() {
     setMineruStatus("verifying");
@@ -240,6 +255,20 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
     } catch (e) {
       setDeepseekStatus("fail");
       setDeepseekMsg(String(e));
+    }
+  }
+
+  // 2026-06-12 V0.3.14:验证 MiniMax key
+  async function handleVerifyMiniMax() {
+    setMiniMaxStatus("verifying");
+    setMiniMaxMsg("");
+    try {
+      const r = await verifyMiniMaxKey(mmKey, mmEndpoint);
+      setMiniMaxStatus(r.ok ? "ok" : "fail");
+      setMiniMaxMsg(r.message);
+    } catch (e) {
+      setMiniMaxStatus("fail");
+      setMiniMaxMsg(String(e));
     }
   }
 
@@ -271,11 +300,17 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
         mineru_api_key: minerKey.trim() || null,
         cloud_llm_api_key: dsKey.trim() || null,
         cloud_llm_endpoint: dsEndpoint.trim() || null,
+        // 2026-06-12 V0.3.14:后端选择 + MiniMax 字段
+        cloud_llm_backend: llmBackend,
+        minimax_api_key: mmKey.trim() || null,
+        minimax_endpoint: mmEndpoint.trim() || null,
         yuandian_api_key: yuandianKey.trim() || null,
         mineru_verified_at:
           mineruStatus === "ok" ? new Date().toISOString() : null,
         deepseek_verified_at:
           deepseekStatus === "ok" ? new Date().toISOString() : null,
+        minimax_verified_at:
+          minimaxStatus === "ok" ? new Date().toISOString() : null,
         yuandian_verified_at:
           yuandianStatus === "ok" ? new Date().toISOString() : null,
       });
@@ -320,6 +355,8 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
             <ConfigPage
               displayName={displayName}
               setDisplayName={setDisplayName}
+              llmBackend={llmBackend}
+              setLlmBackend={setLlmBackend}
               dsKey={dsKey}
               setDsKey={setDsKey}
               deepseekStatus={deepseekStatus}
@@ -328,6 +365,17 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
               resetDeepSeek={() => {
                 setDeepseekStatus("idle");
                 setDeepseekMsg("");
+              }}
+              mmKey={mmKey}
+              setMmKey={setMmKey}
+              mmEndpoint={mmEndpoint}
+              setMmEndpoint={setMmEndpoint}
+              minimaxStatus={minimaxStatus}
+              minimaxMsg={minimaxMsg}
+              onVerifyMiniMax={handleVerifyMiniMax}
+              resetMiniMax={() => {
+                setMiniMaxStatus("idle");
+                setMiniMaxMsg("");
               }}
               minerKey={minerKey}
               setMinerKey={setMinerKey}
@@ -448,12 +496,24 @@ function IntroPage({ page, first }: { page: FeaturePage; first: boolean }) {
 function ConfigPage(props: {
   displayName: string;
   setDisplayName: (v: string) => void;
+  // 2026-06-12 V0.3.14:后端选择
+  llmBackend: "deepseek" | "minimax";
+  setLlmBackend: (v: "deepseek" | "minimax") => void;
   dsKey: string;
   setDsKey: (v: string) => void;
   deepseekStatus: VerifyStatus;
   deepseekMsg: string;
   onVerifyDeepSeek: () => void;
   resetDeepSeek: () => void;
+  // 2026-06-12 V0.3.14:MiniMax 字段
+  mmKey: string;
+  setMmKey: (v: string) => void;
+  mmEndpoint: string;
+  setMmEndpoint: (v: string) => void;
+  minimaxStatus: VerifyStatus;
+  minimaxMsg: string;
+  onVerifyMiniMax: () => void;
+  resetMiniMax: () => void;
   minerKey: string;
   setMinerKey: (v: string) => void;
   mineruStatus: VerifyStatus;
@@ -497,9 +557,45 @@ function ConfigPage(props: {
         优先配置(核心功能要用)
       </p>
       <div className="mt-2 space-y-4">
-        {/* DeepSeek —— 核心,必填 */}
+        {/* 2026-06-12 V0.3.14:云端 LLM 后端选择 */}
         <SetupSection
-          title="DeepSeek API Key(必填 · AI 抽取 / 分析 / 写材料都靠它)"
+          title="云端 LLM 后端(必选一个 · 决定下面填哪个 key 生效)"
+          help={<>DeepSeek 是 V0.3 默认;MiniMax 是 2026-06-12 接入的新后端。任选一个填好 key 就能用。</>}
+        >
+          <div className="flex gap-3">
+            <label className="flex-1 cursor-pointer rounded-md border border-input bg-background p-3 transition-colors hover:border-foreground/50 has-[:checked]:border-foreground has-[:checked]:bg-foreground/5">
+              <input
+                type="radio"
+                name="llm_backend"
+                className="sr-only"
+                checked={props.llmBackend === "deepseek"}
+                onChange={() => props.setLlmBackend("deepseek")}
+              />
+              <div className="font-semibold">DeepSeek</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                V0.3 官方推荐 · 默认
+              </div>
+            </label>
+            <label className="flex-1 cursor-pointer rounded-md border border-input bg-background p-3 transition-colors hover:border-foreground/50 has-[:checked]:border-foreground has-[:checked]:bg-foreground/5">
+              <input
+                type="radio"
+                name="llm_backend"
+                className="sr-only"
+                checked={props.llmBackend === "minimax"}
+                onChange={() => props.setLlmBackend("minimax")}
+              />
+              <div className="font-semibold">MiniMax</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                2026-06-12 V0.3.14 接入 · OpenAI 兼容
+              </div>
+            </label>
+          </div>
+        </SetupSection>
+
+        {/* DeepSeek —— 核心,选了 DeepSeek 时显示 */}
+        {props.llmBackend === "deepseek" && (
+        <SetupSection
+          title="DeepSeek API Key(选了 DeepSeek 时必填 · AI 抽取 / 分析 / 写材料都靠它)"
           help={
             <>
               <ApplyLink
@@ -528,6 +624,47 @@ function ConfigPage(props: {
             disabled={!props.dsKey.trim()}
           />
         </SetupSection>
+        )}
+
+        {/* 2026-06-12 V0.3.14:MiniMax 块,选了 MiniMax 时显示 */}
+        {props.llmBackend === "minimax" && (
+        <SetupSection
+          title="MiniMax API Key(选了 MiniMax 时必填 · 走 /v1/models 鉴权)"
+          help={
+            <>
+              <ApplyLink
+                url="https://api.minimaxi.com/user-center/basic-information/interface-key"
+                label="去 MiniMax 拿 API Key"
+              />
+              · OpenAI 兼容接口 · 填 key 后才能「验证」
+            </>
+          }
+        >
+          <LabeledInput
+            label="API Key"
+            value={props.mmKey}
+            onChange={(v) => {
+              props.setMmKey(v);
+              if (props.minimaxStatus !== "idle") props.resetMiniMax();
+            }}
+            password
+            placeholder="eyJ... 或 sk-..."
+          />
+          <LabeledInput
+            label="Endpoint(留空用默认 https://api.minimaxi.com)"
+            value={props.mmEndpoint}
+            onChange={(v) => props.setMmEndpoint(v)}
+            placeholder="https://api.minimaxi.com"
+          />
+          <VerifyRow
+            label="验证 API Key"
+            status={props.minimaxStatus}
+            msg={props.minimaxMsg}
+            onClick={props.onVerifyMiniMax}
+            disabled={!props.mmKey.trim()}
+          />
+        </SetupSection>
+        )}
 
         {/* MinerU —— 扫描件 OCR,推荐 */}
         <SetupSection

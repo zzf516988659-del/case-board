@@ -1,0 +1,128 @@
+name: Publish npm package
+
+on:
+  push:
+    branches: [main]
+    paths: ['napi/package.json']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  check-version:
+    name: Check version change
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if version changed
+        id: check
+        run: |
+          NEW_VERSION=$(node -p "require('./napi/package.json').version")
+          OLD_VERSION=$(git show HEAD~1:napi/package.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).version")
+          echo "old=$OLD_VERSION new=$NEW_VERSION"
+          if [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            napi/target/
+          key: ${{ runner.os }}-cargo-napi-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-napi-
+
+      - name: Install dependencies
+        working-directory: napi
+        run: bun install
+
+      - name: Build native addon
+        working-directory: napi
+        run: bunx napi build --platform --release
+
+      - name: Upload native binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: napi/*.node
+          if-no-files-found: error
+
+      - name: Upload generated JS bindings
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-bindings
+          path: |
+            napi/index.js
+            napi/index.d.ts
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: napi/artifacts
+
+      - name: Collect binaries and publish
+        working-directory: napi
+        run: |
+          cp artifacts/bindings-*/*.node .
+          cp artifacts/js-bindings/index.js .
+          cp artifacts/js-bindings/index.d.ts .
+
+          echo "=== Package contents ==="
+          ls -la *.node index.js index.d.ts
+
+          npm publish --provenance --access public

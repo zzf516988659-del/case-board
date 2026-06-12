@@ -1,6 +1,6 @@
 [package]
 name = "caseboard"
-version = "0.3.13"
+version = "0.3.14"
 description = "案件看板 · CaseBoard"
 authors = ["刘成"]
 edition = "2021"
@@ -49,10 +49,11 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # 2026-05-26 V0.1.11 PDF 文字抽取 + 分类(纯 Rust 零外部依赖)
 # 选 pdf-inspector 而不是 pdf-extract 的理由:
 #   - 提供 PdfType { TextBased, Scanned, ImageBased, Mixed } 分类 + confidence + pages_needing_ocr
-#   - 5 个真实法律 PDF 实测扫描件识别 100% 准,速度 2-20x 快
+#   - 5 个真实法律 PDF 实测扫描件识别 100% 准、速度 2-20x 快
 #   - 输出 markdown(传票表格被正确保留为 markdown 表格)
-# 风险:git dep(crates.io 暂无,v0.1.0 新项目),cargo 会 lock 到具体 commit
-pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", rev = "8b63ceb0" }
+# 2026-06-12 V0.3.14:从 git dep 改 path 指向 vendor/(本地环境 github.com git 协议不稳,
+# 用 vendor 避免 cargo 联网拉源码。author build.cmd 同步逻辑)。
+pdf-inspector = { path = "../vendor/pdf-inspector" }
 # 2026-05-27 V0.2 加 · 对齐 Python yuandian-legal-search/scripts/cache.py 的 _query_hash 算法
 # 用法只有「hexdigest 前 12 位」一处,接口稳定,无安全风险。
 md5 = "0.7"

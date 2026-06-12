@@ -355,6 +355,14 @@ export interface Settings {
   cloud_llm_endpoint: string | null;
   cloud_llm_model: string | null;
   cloud_llm_api_key: string | null;
+  /** 2026-06-12 V0.3.14:云端 LLM 后端。"deepseek"(默认) / "minimax"。None = 用 deepseek。 */
+  cloud_llm_backend: string | null;
+  /** 2026-06-12 V0.3.14:MiniMax API key(独立字段,跟 cloud_llm_api_key 共存)。 */
+  minimax_api_key: string | null;
+  /** 2026-06-12 V0.3.14:MiniMax endpoint(默认 https://api.minimaxi.com)。 */
+  minimax_endpoint: string | null;
+  /** 2026-06-12 V0.3.14:MiniMax 模型档位(独立于 cloud_llm_model)。 */
+  minimax_model: string | null;
   /** 2026-05-24 k:元典法律开放平台 API key(执行案件查被执行人 / 财产线索)*/
   yuandian_api_key: string | null;
   /** 2026-06-01 V0.3:快递100 实时查询 customer + key(快递查询工具用)*/
@@ -370,6 +378,8 @@ export interface Settings {
   mineru_verified_at: string | null;
   /** DeepSeek key 验证通过时间。 */
   deepseek_verified_at: string | null;
+  /** 2026-06-12 V0.3.14:MiniMax key 验证通过时间。 */
+  minimax_verified_at: string | null;
   /** 2026-05-25 V0.1.8:元典 key 验证通过时间。 */
   yuandian_verified_at: string | null;
 

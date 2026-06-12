@@ -8,6 +8,29 @@
 
 ---
 
+## [0.3.14] - 2026-06-12
+
+### 🆕 新增
+
+- **云端 LLM 双后端架构**(`deepseek` / `minimax`)。`settings.cloud_llm_backend` 字段让用户下拉选择,任一后端的 key / endpoint / 模型档位独立保存,互不干扰。
+- **MiniMax 后端接入**:`https://api.minimaxi.com` OpenAI 兼容协议,模型名 `minimax-M2.7`(轻量) / `minimax-M3`(强推理,默认开思考)。验证接口走 `GET /v1/models` 标准端点。设置页新加完整 MiniMax section(API Key + 端点 + 模型档位 + 验证按钮)。
+- **`verify_minimax_key` IPC + `get_minimax_balance` IPC**(后者空壳返回 None,MiniMax 暂无公开余额端点)。
+- **模型路由按 backend 切默认模型名**:`model_router::route_model` 读 `settings.effective_cloud_llm_backend()` 决定 flash/pro 默认值,温度按模型名特征判断(0.3 / 0.6 / 0.15)。
+
+### 🔧 变更
+
+- **保留 `deepseek` 后端 + 余额模块完整代码**:`deepseek/mod.rs` 函数签名 + IPC 全保留,仅在 `lib.rs::get_deepseek_balance` 加 backend 短路(切到 minimax 时直接返回 Ok(None),不发起远程调用)。老用户零感知,所有 DeepSeek 用户继续工作。
+- **`feedback` 报告加 `cloud_llm_backend` 字段 + minimax 字段**:反馈报告里能直接看到用户在用哪个后端。
+- **`pdf-inspector` / `lopdf` 从 git dep 改 path 指向 `vendor/`**:本地环境 github.com git 协议不稳,避免 cargo 联网拉源码卡住。
+- **Cargo.toml + package.json 版本号 → 0.3.14**。
+
+### ⚠️ 已知限制
+
+- MiniMax 公开 API 没有余额查询端点,`get_minimax_balance` 恒返回 None。
+- `lib.rs::get_deepseek_balance` 在 backend=minimax 时是空壳,切回 deepseek 后立即可用。
+
+---
+
 ## [0.3.13] - 2026-06-12
 
 ### 🆕 新增(0.3.10 ~ 0.3.13 累积同步)

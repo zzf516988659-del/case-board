@@ -144,6 +144,17 @@ export function verifyDeepSeekKey(
   });
 }
 
+/** 2026-06-12 V0.3.14:在线验证 MiniMax API key(走 /v1/models 标准端点)。 */
+export function verifyMiniMaxKey(
+  apiKey: string,
+  endpoint?: string,
+): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_minimax_key", {
+    apiKey,
+    endpoint: endpoint || null,
+  });
+}
+
 /** 2026-05-25 V0.1.8:在线验证元典(open.chineselaw.com)API key。
  *  消耗 1 次企业搜索配额(用 name=test top_k=1 探测,代价最小)。*/
 export function verifyYuandianKey(apiKey: string): Promise<VerifyResult> {
@@ -552,6 +563,12 @@ export interface SettingsSnapshot {
   deepseek_api_key: string;
   deepseek_endpoint: string | null;
   deepseek_verified: boolean;
+  /** 2026-06-12 V0.3.14:云端 LLM 后端("deepseek" / "minimax") */
+  cloud_llm_backend: string;
+  /** 2026-06-12 V0.3.14:MiniMax key 状态(独立于 deepseek key)。 */
+  minimax_api_key: string;
+  minimax_endpoint: string | null;
+  minimax_verified: boolean;
   yuandian_api_key: string;
   yuandian_verified: boolean;
   local_model_dir: string | null;

@@ -93,6 +93,21 @@ pub struct Settings {
     /// 云端 LLM API key
     pub cloud_llm_api_key: Option<String>,
 
+    /// 2026-06-12 V0.3.14:云端 LLM 后端选择。`"deepseek"`(默认) / `"minimax"`。
+    /// 老配置 None = 默认 deepseek(向后兼容)。
+    /// 选择决定 `LlmConfig::from_settings` 走哪条 endpoint / 模型 / api_key 链路,
+    /// 也决定 `deepseek/mod.rs` 余额查询是否发起远程请求。
+    pub cloud_llm_backend: Option<String>,
+    /// 2026-06-12 V0.3.14:MiniMax API key(独立字段,跟 deepseek 互不干扰)。
+    pub minimax_api_key: Option<String>,
+    /// 2026-06-12 V0.3.14:MiniMax endpoint(默认 `https://api.minimaxi.com`)。
+    pub minimax_endpoint: Option<String>,
+    /// 2026-06-12 V0.3.14:MiniMax 模型档位(覆盖 cloud_llm_model,允许每个后端独立配):
+    ///   - `'minimax-M2.7'`(默认)= 轻量档
+    ///   - `'minimax-M3'` = 强推理档(默认开思考)
+    ///   - `'auto'` = 自动挡(短问 M2.7 / 长问 + 推理关键词 M3)
+    pub minimax_model: Option<String>,
+
     /// 2026-05-24 k:元典法律开放平台 API key — 执行案件查被执行人 / 失信 / 财产线索 用
     /// 申请:https://open.chineselaw.com/
     pub yuandian_api_key: Option<String>,
@@ -123,6 +138,9 @@ pub struct Settings {
     pub mineru_verified_at: Option<String>,
     /// DeepSeek key 通过验证的时间(同上)。
     pub deepseek_verified_at: Option<String>,
+    /// 2026-06-12 V0.3.14:MiniMax key 通过验证的时间(同上)。
+    /// 跟 `deepseek_verified_at` 完全独立 —— 后端 = deepseek 时读老字段,后端 = minimax 时读这个。
+    pub minimax_verified_at: Option<String>,
     /// 2026-05-25 V0.1.8:元典 key 通过验证的时间(同上)。
     pub yuandian_verified_at: Option<String>,
 
@@ -205,6 +223,49 @@ impl Settings {
     pub fn needs_local_server(&self) -> bool {
         self.effective_ocr_provider() == "local" || self.effective_llm_provider() == "local"
     }
+
+    /// 2026-06-12 V0.3.14:云端 LLM 后端选择(`"deepseek"` / `"minimax"`)。
+    /// 老配置 None / 空字符串 / 不识别的值 = 默认 `"deepseek"`(零感知兼容)。
+    pub fn effective_cloud_llm_backend(&self) -> &str {
+        match self.cloud_llm_backend.as_deref().map(str::trim) {
+            Some("minimax") => "minimax",
+            Some("deepseek") | None | Some("") => "deepseek",
+            // 兜底:不识别值一律按 deepseek 处理,跟老逻辑一致
+            Some(_) => "deepseek",
+        }
+    }
+
+    /// 2026-06-12 V0.3.14:当前后端生效的 API key。
+    pub fn effective_cloud_llm_api_key(&self) -> Option<String> {
+        match self.effective_cloud_llm_backend() {
+            "minimax" => self.minimax_api_key.clone().filter(|k| !k.trim().is_empty()),
+            _ => self.cloud_llm_api_key.clone().filter(|k| !k.trim().is_empty()),
+        }
+    }
+
+    /// 2026-06-12 V0.3.14:当前后端生效的 endpoint。`None` 由 LlmConfig::from_settings 兜默认。
+    pub fn effective_cloud_llm_endpoint(&self) -> Option<String> {
+        match self.effective_cloud_llm_backend() {
+            "minimax" => self.minimax_endpoint.clone(),
+            _ => self.cloud_llm_endpoint.clone(),
+        }
+    }
+
+    /// 2026-06-12 V0.3.14:当前后端生效的「模型档位」。`None` 时交给 model_router 用 backend 默认。
+    pub fn effective_cloud_llm_model(&self) -> Option<String> {
+        match self.effective_cloud_llm_backend() {
+            "minimax" => self.minimax_model.clone(),
+            _ => self.cloud_llm_model.clone(),
+        }
+    }
+
+    /// 2026-06-12 V0.3.14:当前后端 key 是否验证过(绿勾判据)。
+    pub fn effective_cloud_llm_verified_at(&self) -> Option<&String> {
+        match self.effective_cloud_llm_backend() {
+            "minimax" => self.minimax_verified_at.as_ref().filter(|s| !s.trim().is_empty()),
+            _ => self.deepseek_verified_at.as_ref().filter(|s| !s.trim().is_empty()),
+        }
+    }
 }
 
 impl Settings {
@@ -231,6 +292,16 @@ impl Settings {
             cloud_llm_model: self
                 .cloud_llm_model
                 .or_else(|| Some("deepseek-v4-flash".to_string())),
+            // 2026-06-12 V0.3.14:MiniMax 默认值兜底。None = 用 deepseek(老用户零感知)。
+            cloud_llm_backend: self
+                .cloud_llm_backend
+                .or_else(|| Some("deepseek".to_string())),
+            minimax_endpoint: self
+                .minimax_endpoint
+                .or_else(|| Some("https://api.minimaxi.com".to_string())),
+            minimax_model: self
+                .minimax_model
+                .or_else(|| Some("minimax-M2.7".to_string())),
             embedding_endpoint: self
                 .embedding_endpoint
                 .or_else(|| Some(crate::embedding::DEFAULT_ENDPOINT.to_string())),
