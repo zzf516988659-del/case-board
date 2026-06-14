@@ -35,7 +35,7 @@ pnpm build
 echo
 
 # 2. Tauri 构建(签名/dmg/app)
-echo "▶ Step 2/2: Tauri 构建 (pnpm tauri build --bundles dmg)"
+echo "▶ Step 2/2: Tauri 构建 (pnpm tauri build --bundles app,dmg)"
 echo "    (首次约 5-10 分钟,后续 1-2 分钟。期间不会弹窗,可放心等)"
 # 注入匿名遥测配置(telemetry/.env.telemetry 为 gitignored;key 进 dmg 但不进 git)。
 # 缺文件时 option_env! 取不到 → 遥测在该 dmg 里自动禁用,不报错。
@@ -46,7 +46,7 @@ if [ -f telemetry/.env.telemetry ]; then
 else
   echo "    ⚠️ 未找到 telemetry/.env.telemetry —— 本次 dmg 不含遥测"
 fi
-pnpm tauri build --bundles dmg
+pnpm tauri build --bundles app,dmg
 
 # 找产出
 # 注意:本项目是 cargo workspace,target 目录在仓库根而不是 src-tauri/target
