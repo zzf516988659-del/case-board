@@ -107,6 +107,12 @@ pub struct KbFileIndex {
 pub struct KbIndex {
     /// `<endpoint>|<model>`;变了 → 整库失效重建(维度也会变)。
     pub signature: String,
+    /// 2026-06-15 V0.3.18 fix:KB 根目录的 canonical 绝对路径(用字符串比较,不存 PathBuf
+    /// 避免 Windows 反斜杠/正斜杠差异)。用户改 settings.local_kb_root 后,下次建索引
+    /// 检测到 existing.kb_root != current_root → 把 existing.files 视作废索引,全量重建。
+    /// `#[serde(default)]` 兼容老索引文件(无此字段 → 空字符串 → 必定视为不一致 → 重建)。
+    #[serde(default)]
+    pub kb_root: String,
     pub files: Vec<KbFileIndex>,
 }
 
@@ -673,8 +679,31 @@ pub async fn build_or_update_index(
 ) -> Result<KbIndex, String> {
     use tauri::Emitter;
 
+    // 2026-06-15 V0.3.18 fix:把当前 KB 根标准化成字符串(canonical 绝对路径)
+    // 用于检测"用户改了 settings.local_kb_root"—— 切换后,existing 索引里的 rel_path
+    // 已经对不上新根,视作废索引,清空 files 全量重建,避免下次搜返回旧 KB 内容
+    // (rel_path 仍然指向旧根 → 用户视角看是"搜到不存在的文件")。
+    let current_root_str = kb_root
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| kb_root.to_string_lossy().into_owned());
+
     let sig = crate::embedding::index::signature(endpoint, model);
-    let existing = load_index().await;
+    let mut existing = load_index().await;
+    // 根切换 → 视作新 KB,清空 existing.files。signature 也清空,让 plan_update 走全量。
+    if existing.kb_root != current_root_str {
+        if !existing.files.is_empty() {
+            crate::dlog!(
+                "[kb_index] KB 根切换:{} → {} 清空旧索引 {} 个文件",
+                existing.kb_root,
+                current_root_str,
+                existing.files.len()
+            );
+        }
+        existing.signature.clear();
+        existing.files.clear();
+    }
     let corpus = collect_corpus(kb_root);
     let current: Vec<(String, String)> = corpus
         .iter()
@@ -757,6 +786,7 @@ pub async fn build_or_update_index(
         // 每个文件完成即落盘:长任务可中断续跑 + 文件可见增长。
         let snapshot = KbIndex {
             signature: sig.clone(),
+            kb_root: current_root_str.clone(),
             files: files.clone(),
         };
         if let Err(e) = save_index(&snapshot).await {
@@ -772,6 +802,7 @@ pub async fn build_or_update_index(
 
     let index = KbIndex {
         signature: sig,
+        kb_root: current_root_str,
         files,
     };
     // 兜底再存一次(纯复用、无 pending 时上面循环不落盘,这里确保 signature/集合落地)。
