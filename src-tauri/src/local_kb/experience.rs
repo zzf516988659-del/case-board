@@ -19,11 +19,18 @@ pub fn save_case_experience(
     case_name: &str,
     markdown: &str,
 ) -> Result<PathBuf, KbError> {
+    // 2026-06-15 V0.3.18 fix:`local_kb_root` 可能是 "~/Documents/知识库" 这种带 tilde 的
+    // 相对路径(macOS 默认值),Windows 上 PathBuf::from 不会展开 tilde → is_dir() 永远
+    // 判为 false → 误报"KB 路径不存在:~/Documents/知识库"。和 cache.rs:48 / status.rs:70
+    // 对齐,显式 tilde 展开。
     let root = settings
         .local_kb_root
         .as_deref()
         .filter(|_| settings.local_kb_enabled == Some(true))
-        .map(PathBuf::from)
+        .map(|raw| {
+            let expanded = shellexpand::tilde(raw).into_owned();
+            PathBuf::from(expanded)
+        })
         .ok_or_else(|| KbError::NoPath(PathBuf::from("(未配置或未启用本地知识库)")))?;
     if !root.is_dir() {
         return Err(KbError::NoPath(root));
