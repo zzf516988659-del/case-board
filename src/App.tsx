@@ -355,12 +355,29 @@ function App() {
       }
     }
     {
-      const filled = !!s.cloud_llm_api_key?.trim();
-      const verified = !!s.deepseek_verified_at;
+      // 2026-06-15 V0.3.18 fix:导入校验按 cloud_llm_backend 路由(MiniMax/DeepSeek)。
+      // 三层兜底(任一条件命中 → 判 minimax):
+      //   1. 显式 cloud_llm_backend === "minimax"
+      //   2. 填了 minimax_key 但没填 deepseek_key
+      //   3. 填的 endpoint 域名是 minimax
+      const hasMinimaxKey = !!s.minimax_api_key?.trim();
+      const hasDeepseekKey = !!s.cloud_llm_api_key?.trim();
+      const endpointLower = (s.cloud_llm_endpoint ?? "").toLowerCase();
+      const endpointIsMinimax =
+        endpointLower.includes("minimax") && !endpointLower.includes("deepseek");
+      const isMinimax =
+        s.cloud_llm_backend === "minimax" ||
+        (hasMinimaxKey && !hasDeepseekKey) ||
+        (endpointIsMinimax && !hasDeepseekKey);
+      const filled = isMinimax ? hasMinimaxKey : hasDeepseekKey;
+      const verified = isMinimax
+        ? !!s.minimax_verified_at
+        : !!s.deepseek_verified_at;
+      const providerLabel = isMinimax ? "MiniMax" : "DeepSeek";
       if (!filled) {
-        issues.push({ label: "DeepSeek API Key(云端 LLM)", reason: "missing" });
+        issues.push({ label: `${providerLabel} API Key(云端 LLM)`, reason: "missing" });
       } else if (!verified) {
-        issues.push({ label: "DeepSeek API Key(云端 LLM)", reason: "unverified" });
+        issues.push({ label: `${providerLabel} API Key(云端 LLM)`, reason: "unverified" });
       }
     }
 
