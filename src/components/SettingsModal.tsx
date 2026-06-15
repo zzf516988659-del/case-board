@@ -797,26 +797,26 @@ export function SettingsModal({
                       )}
                     </Field>
                     <Field
-                      label="模型名"
-                      hint="可编辑。以 MiniMax 控制台实际型号为准(写错会报 404);留空默认 MiniMax-M2"
+                      label="模型档位"
+                      hint="按需选择:M2.7 轻量便宜,M2.7-highspeed 速度加倍,M3 强推理(1M 上下文)"
                     >
-                      <input
-                        type="text"
-                        list="minimax-model-presets"
-                        value={settings.minimax_model ?? ""}
+                      <select
+                        value={normalizeMinimaxModel(settings.minimax_model)}
                         onChange={(e) =>
                           updateField("minimax_model", e.target.value || null)
                         }
-                        placeholder="MiniMax-M2"
                         className={inputCls}
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
-                      <datalist id="minimax-model-presets">
-                        <option value="MiniMax-M2" />
-                        <option value="MiniMax-M2.7" />
-                        <option value="MiniMax-M3" />
-                      </datalist>
+                      >
+                        <option value="MiniMax-M2.7">
+                          MiniMax-M2.7(轻量档,60 TPS,推荐日常)
+                        </option>
+                        <option value="MiniMax-M2.7-highspeed">
+                          MiniMax-M2.7-highspeed(高速版,100 TPS)
+                        </option>
+                        <option value="MiniMax-M3">
+                          MiniMax-M3(强推理档,1M 上下文,复杂法律分析)
+                        </option>
+                      </select>
                     </Field>
                     {/* Endpoint 默认 https://api.minimaxi.com;聊天真实路径
                         /v1/text/chatcompletion_v2 由后端自动补 → 不暴露输入框。 */}
@@ -2281,4 +2281,16 @@ function formatDateTime(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+// 2026-06-15 V0.3.18 fix:MiniMax 模型名历史遗留大小写不一致 + 默认值缺失。
+// settings 里可能是 "minimax-M3"(小写 m)或 null/空,select value 必须匹配 option.value。
+// 不识别的旧值(用户手动改过的)透传保留,仅在 select 首次显示时兜底到 M2.7。
+function normalizeMinimaxModel(raw: string | null | undefined): string {
+  if (!raw) return "MiniMax-M2.7";
+  const lower = raw.trim().toLowerCase();
+  if (lower === "minimax-m2.7" || lower === "minimax-m2") return "MiniMax-M2.7";
+  if (lower === "minimax-m2.7-highspeed") return "MiniMax-M2.7-highspeed";
+  if (lower === "minimax-m3") return "MiniMax-M3";
+  return raw; // 用户手动输入的(可写)保持原值,但 select 不会高亮 — 用户重选一次即可
 }
