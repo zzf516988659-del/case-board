@@ -39,6 +39,7 @@ import {
   saveSettings,
   testMcpServer,
   verifyDeepSeekKey,
+  verifyMiniMaxKey,
   verifyMinerUKey,
   verifyPaddleVlKey,
   verifyEmbeddingKey,
@@ -104,6 +105,9 @@ export function SettingsModal({
   const [paddleMsg, setPaddleMsg] = useState<string>("");
   const [deepseekStatus, setDeepseekStatus] = useState<VerifyStatus>("idle");
   const [deepseekMsg, setDeepseekMsg] = useState<string>("");
+  // 2026-06-15 · MiniMax API key 在线验证状态
+  const [minimaxStatus, setMinimaxStatus] = useState<VerifyStatus>("idle");
+  const [minimaxMsg, setMinimaxMsg] = useState<string>("");
   // 2026-05-25 V0.1.8 · 元典 API key 在线验证状态
   const [yuandianStatus, setYuandianStatus] = useState<VerifyStatus>("idle");
   const [yuandianMsg, setYuandianMsg] = useState<string>("");
@@ -121,6 +125,9 @@ export function SettingsModal({
     }
     if (settings.deepseek_verified_at && deepseekStatus === "idle") {
       setDeepseekStatus("ok");
+    }
+    if (settings.minimax_verified_at && minimaxStatus === "idle") {
+      setMinimaxStatus("ok");
     }
     if (settings.yuandian_verified_at && yuandianStatus === "idle") {
       setYuandianStatus("ok");
@@ -215,6 +222,35 @@ export function SettingsModal({
       setDeepseekStatus("fail");
       setDeepseekMsg(String(e));
       updateField("deepseek_verified_at", null);
+    }
+  }
+
+  async function handleVerifyMiniMax() {
+    if (!settings?.minimax_api_key?.trim()) {
+      setMinimaxStatus("fail");
+      setMinimaxMsg("请先填入 API Key");
+      return;
+    }
+    setMinimaxStatus("verifying");
+    setMinimaxMsg("");
+    try {
+      const r = await verifyMiniMaxKey(
+        settings.minimax_api_key,
+        settings.minimax_endpoint ?? undefined,
+      );
+      if (r.ok) {
+        setMinimaxStatus("ok");
+        setMinimaxMsg("");
+        updateField("minimax_verified_at", new Date().toISOString());
+      } else {
+        setMinimaxStatus("fail");
+        setMinimaxMsg(r.message);
+        updateField("minimax_verified_at", null);
+      }
+    } catch (e) {
+      setMinimaxStatus("fail");
+      setMinimaxMsg(String(e));
+      updateField("minimax_verified_at", null);
     }
   }
 
@@ -595,6 +631,29 @@ export function SettingsModal({
                 </Field>
               </Section>
 
+                  <Section title="云端 AI 后端">
+                    <Field label="提供商">
+                      <select
+                        value={settings.cloud_llm_backend ?? "deepseek"}
+                        onChange={(e) =>
+                          updateField(
+                            "cloud_llm_backend",
+                            e.target.value === "minimax" ? "minimax" : null,
+                          )
+                        }
+                        className={inputCls}
+                      >
+                        <option value="deepseek">DeepSeek(默认)</option>
+                        <option value="minimax">MiniMax(M 系列)</option>
+                      </select>
+                      <p className="mt-1 text-label text-muted-foreground">
+                        切换后下面只显示所选后端的配置,两边的 Key
+                        各自独立保存、互不覆盖。
+                      </p>
+                    </Field>
+                  </Section>
+
+                  {(settings.cloud_llm_backend ?? "deepseek") !== "minimax" && (
                   <Section
                     title="DeepSeek"
                     link={{
@@ -677,6 +736,92 @@ export function SettingsModal({
                     {/* Endpoint 默认 https://api.deepseek.com,改了反而可能用不了 → 不暴露输入框,
                         cloud_llm_endpoint 留 null,后端按默认走。 */}
                   </Section>
+                  )}
+
+                  {(settings.cloud_llm_backend ?? "deepseek") === "minimax" && (
+                  <Section
+                    title="MiniMax"
+                    link={{
+                      label: "点这里申请 API Key",
+                      href: "https://platform.minimaxi.com/user-center/payment/token-plan",
+                    }}
+                  >
+                    <Field label="API Key">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="password"
+                          value={settings.minimax_api_key ?? ""}
+                          onChange={(e) => {
+                            updateField(
+                              "minimax_api_key",
+                              e.target.value || null,
+                            );
+                            if (minimaxStatus !== "idle") {
+                              setMinimaxStatus("idle");
+                              setMinimaxMsg("");
+                              updateField("minimax_verified_at", null);
+                            }
+                          }}
+                          placeholder="填入 MiniMax 平台的 API Key"
+                          className={cn(inputCls, "flex-1")}
+                          autoComplete="off"
+                        />
+                        <VerifyStatusIcon status={minimaxStatus} />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="disabled:cursor-not-allowed"
+                          onClick={handleVerifyMiniMax}
+                          disabled={
+                            minimaxStatus === "verifying" ||
+                            !settings.minimax_api_key?.trim()
+                          }
+                        >
+                          {minimaxStatus === "verifying" ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            "验证"
+                          )}
+                        </Button>
+                      </div>
+                      {minimaxStatus === "fail" && minimaxMsg && (
+                        <p className="mt-1.5 text-xs text-red-600">
+                          ✗ {minimaxMsg}
+                        </p>
+                      )}
+                      {minimaxStatus === "ok" && (
+                        <p className="mt-1.5 text-xs text-green-700">
+                          ✓ 已验证通过,可以使用
+                        </p>
+                      )}
+                    </Field>
+                    <Field
+                      label="模型名"
+                      hint="可编辑。以 MiniMax 控制台实际型号为准(写错会报 404);留空默认 MiniMax-M2"
+                    >
+                      <input
+                        type="text"
+                        list="minimax-model-presets"
+                        value={settings.minimax_model ?? ""}
+                        onChange={(e) =>
+                          updateField("minimax_model", e.target.value || null)
+                        }
+                        placeholder="MiniMax-M2"
+                        className={inputCls}
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                      <datalist id="minimax-model-presets">
+                        <option value="MiniMax-M2" />
+                        <option value="MiniMax-M2.7" />
+                        <option value="MiniMax-M3" />
+                      </datalist>
+                    </Field>
+                    {/* Endpoint 默认 https://api.minimaxi.com;聊天真实路径
+                        /v1/text/chatcompletion_v2 由后端自动补 → 不暴露输入框。 */}
+                  </Section>
+                  )}
                 </>
 
                   {/* 2026-06-12:PaddleOCR VL-1.6(AI Studio)。填了 key 即自动成为

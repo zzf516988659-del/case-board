@@ -31,6 +31,10 @@ pub struct ModelChoice {
 /// 短问答仍会自然停(`finish_reason=stop`)。模型档位(flash/pro)由作者在 Settings 手切,本值不区分。
 pub const MAX_OUTPUT_TOKENS: u32 = 384_000;
 
+/// MiniMax M 系列输出上限保守值(M2.7≈8K / M3≈32K,且思考占 output)。
+/// 不用 DeepSeek 的 384K —— 远超 MiniMax 模型上限,可能触发 2013 参数错。
+pub const MINIMAX_MAX_OUTPUT_TOKENS: u32 = 32_768;
+
 impl ModelChoice {
     /// DeepSeek V4 Flash:快速 + 便宜,适合摘要/列表/简单问答。
     pub fn flash() -> Self {
@@ -66,10 +70,36 @@ impl ModelChoice {
             max_tokens: MAX_OUTPUT_TOKENS,
         }
     }
+
+    /// MiniMax M 系列(2026-06-15)。无 flash/pro 档位之分,用户在设置里直接填模型名。
+    /// 温度:M3 官方建议 1.0,其余 M 系列 0.3(M 系列禁 0.0);max_tokens 用 MiniMax 保守上限。
+    pub fn from_minimax(model: &str) -> Self {
+        let temperature = if model.to_ascii_lowercase().contains("m3") {
+            1.0
+        } else {
+            0.3
+        };
+        Self {
+            model: model.to_string(),
+            temperature,
+            max_tokens: MINIMAX_MAX_OUTPUT_TOKENS,
+        }
+    }
 }
 
 /// 路由主入口。统一读 `settings.cloud_llm_model` 这一个「模型档位」字段。
 pub fn route_model(task: TaskType, user_message: &str, settings: &Settings) -> ModelChoice {
+    // 2026-06-15:MiniMax 后端不套用 DeepSeek 的 flash/pro/auto 档位 —— 用户直接填模型名。
+    if settings.effective_cloud_llm_backend() == "minimax" {
+        let model = settings
+            .minimax_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("MiniMax-M2");
+        return ModelChoice::from_minimax(model);
+    }
+
     // 档位:默认 flash(便宜)。空字符串也当默认。
     let mode = settings
         .cloud_llm_model

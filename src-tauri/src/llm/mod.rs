@@ -234,6 +234,10 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     /// 单次请求超时(秒)
     pub timeout_secs: u64,
+    /// 抽取类请求(extract_case_fields / global_extract)用的温度。
+    /// DeepSeek / 本机:0.0(确定性);MiniMax M 系列**不能用 0.0**(思考会死循环),用 0.3。
+    /// 2026-06-15。注意:chat 链路温度走 `model_router::ModelChoice`,不读本字段。
+    pub temperature: f32,
 }
 
 impl LlmConfig {
@@ -244,6 +248,7 @@ impl LlmConfig {
             model: "MiniCPM-V-4_6-Q8_0.gguf".to_string(),
             api_key: None,
             timeout_secs: 180,
+            temperature: 0.0,
         }
     }
 
@@ -252,6 +257,36 @@ impl LlmConfig {
     /// 2026-05-23 晚六:LLM 单独维度,跟 OCR 解耦。
     pub fn from_settings(settings: &crate::settings::Settings) -> Self {
         if settings.effective_llm_provider() == "cloud" {
+            // 2026-06-15:云端后端二选一。MiniMax 协议路径与 DeepSeek 不同(详 from_settings 注释)。
+            if settings.effective_cloud_llm_backend() == "minimax" {
+                // MiniMax:自有 v2 协议,聊天路径 /v1/text/chatcompletion_v2(**不是** OpenAI 兼容)。
+                let base = settings
+                    .minimax_endpoint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("https://api.minimaxi.com");
+                let endpoint = if base.contains("/chatcompletion_v2") {
+                    base.to_string() // 用户已填完整路径,原样用
+                } else {
+                    format!("{}/v1/text/chatcompletion_v2", base.trim_end_matches('/'))
+                };
+                let model = settings
+                    .minimax_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("MiniMax-M2")
+                    .to_string();
+                // M 系列恒思考,抽取也不能用 0.0(会死循环);0.3 兼顾确定性与可用。
+                return Self {
+                    endpoint,
+                    model,
+                    api_key: settings.minimax_api_key.clone(),
+                    timeout_secs: 120, // M 系列思考慢,给足
+                    temperature: 0.3,
+                };
+            }
             // 云端模式:用 cloud_llm_* 字段。endpoint 自动补 /v1/chat/completions(DeepSeek 兼容 OpenAI 协议)
             let endpoint = settings
                 .cloud_llm_endpoint
@@ -277,6 +312,7 @@ impl LlmConfig {
                 model: base_model,
                 api_key: settings.cloud_llm_api_key.clone(),
                 timeout_secs: 60, // 云端比本机快,60s 足够;本机要 180s
+                temperature: 0.0,
             }
         } else {
             // 纯本地模式:用 ollama_* 字段(实际是 llama-server :8899)
@@ -299,6 +335,7 @@ impl LlmConfig {
                     .unwrap_or_else(|| "MiniCPM-V-4_6-Q8_0.gguf".to_string()),
                 api_key: None,
                 timeout_secs: 180,
+                temperature: 0.0,
             }
         }
     }
@@ -380,7 +417,7 @@ pub async fn extract_case_fields_with_hint(
             content: &prompt,
         }],
         max_tokens: 4096, // 2026-05-23 晚十三 扩字段后(party_contacts/fees/court_contacts/key_dates/preservations 等),输出可能 1.5-3k tokens
-        temperature: 0.0,
+        temperature: config.temperature, // DeepSeek/本机=0.0;MiniMax=0.3(M 系列禁 0.0)
         stream: false,
     };
 

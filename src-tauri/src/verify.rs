@@ -177,6 +177,65 @@ pub async fn verify_deepseek_key(api_key: &str, endpoint: Option<&str>) -> Verif
     ))
 }
 
+/// 验证 MiniMax API key(2026-06-15)。
+///
+/// MiniMax 聊天走自有协议 `/v1/text/chatcompletion_v2`,但**鉴权 / 列模型**用 OpenAI 兼容的
+/// `/v1/models`。复用 DeepSeek 的 verify 套路:打 `/v1/models`,200 = ok / 401|403 = key 失效。
+pub async fn verify_minimax_key(api_key: &str, endpoint: Option<&str>) -> VerifyResult {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return VerifyResult::fail("API Key 为空");
+    }
+    if api_key.len() < 8 {
+        return VerifyResult::fail("API Key 太短");
+    }
+
+    let base = endpoint
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://api.minimaxi.com");
+    // 容错:用户可能填了 base、/v1、或完整的 chatcompletion_v2 路径 —— 一律归一到 `<base>/v1/models`。
+    let base = base.trim_end_matches('/');
+    let base = base
+        .trim_end_matches("/v1/text/chatcompletion_v2")
+        .trim_end_matches("/v1")
+        .trim_end_matches('/');
+    let url = format!("{}/v1/models", base);
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return VerifyResult::fail(format!("HTTP 客户端创建失败: {}", e)),
+    };
+
+    let resp = match client
+        .get(&url)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return VerifyResult::fail(format!("网络错误: {}", e)),
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        return VerifyResult::ok();
+    }
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return VerifyResult::fail("API Key 无效或已过期(401/403)");
+    }
+    let body = resp.text().await.unwrap_or_default();
+    VerifyResult::fail(format!(
+        "HTTP {} · {}",
+        status.as_u16(),
+        body.chars().take(200).collect::<String>()
+    ))
+}
+
 /// 验证元典(open.chineselaw.com)API key。
 ///
 /// 两段探测:

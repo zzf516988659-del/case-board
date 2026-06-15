@@ -145,8 +145,32 @@ pub async fn case_chat_impl(
 
     // ── 1. 取 settings + LlmConfig ────────────────────────────────────
     let settings: Settings = crate::settings::read_settings().unwrap_or_default();
-    if settings.effective_llm_provider() == "cloud" && settings.cloud_llm_api_key.is_none() {
-        return Err("尚未配置 DeepSeek API Key,请在设置页填入".into());
+    // 2026-06-15:按云端后端检查对应的 key(MiniMax / DeepSeek 各自独立字段)。
+    if settings.effective_llm_provider() == "cloud" {
+        let backend = settings.effective_cloud_llm_backend();
+        let key_missing = if backend == "minimax" {
+            settings
+                .minimax_api_key
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        } else {
+            settings
+                .cloud_llm_api_key
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        };
+        if key_missing {
+            let name = if backend == "minimax" {
+                "MiniMax"
+            } else {
+                "DeepSeek"
+            };
+            return Err(format!("尚未配置 {} API Key,请在设置页填入", name));
+        }
     }
     let mut llm_config = LlmConfig::from_settings(&settings);
 

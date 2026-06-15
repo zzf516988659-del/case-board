@@ -73,49 +73,42 @@ pub struct CaseWithDocs {
 const TEXT_FILE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
 /// 用系统默认应用打开一个文件(PDF → Preview,docx → Word,图片 → Preview,etc.)。
+///
+/// 2026-06-15:原先硬编码 macOS `open`,Windows 上无此命令直接失败(用户反映"打不开源文件")。
+/// 改用 `tauri-plugin-opener` 跨平台自由函数(mac `open` / win `start` / linux `xdg-open`)。
 #[tauri::command]
 fn open_in_default_app(path: String) -> Result<(), String> {
     let p = Path::new(&path);
     if !p.exists() {
         return Err(format!("文件不存在: {}", path));
     }
-    // 用 std::process::Command 调 macOS 的 `open` 命令
-    // 简单可靠,不依赖额外 plugin(虽然有 tauri-plugin-opener,但它的 API 限制更多)
-    std::process::Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| format!("无法打开: {}", e))?;
-    Ok(())
+    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| format!("无法打开: {}", e))
 }
 
 /// 用系统默认浏览器打开一个 URL(Settings 里的"申请 token"链接用)。
 ///
 /// 2026-05-24 k:Tauri WebView 里 `<a target="_blank">` 不会跳系统浏览器,必须走原生 open。
+/// 2026-06-15:原 `Command::new("open")` 只在 macOS 工作,Windows 申请按钮点了没反应。
+/// 改用 `tauri-plugin-opener` 跨平台自由函数。
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(format!("不是合法 http(s) URL: {}", url));
     }
-    std::process::Command::new("open")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("无法打开浏览器: {}", e))?;
-    Ok(())
+    tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("无法打开浏览器: {}", e))
 }
 
-/// 在 Finder 中显示该路径(选中并打开父目录)。macOS 用 `open -R`。
+/// 在文件管理器中显示该路径(选中并打开父目录)。
+///
+/// 2026-06-15:跨平台改造(原 macOS `open -R` → opener 的 reveal_item_in_dir)。
 #[tauri::command]
 fn reveal_in_finder(path: String) -> Result<(), String> {
     let p = Path::new(&path);
     if !p.exists() {
         return Err(format!("路径不存在: {}", path));
     }
-    std::process::Command::new("open")
-        .arg("-R")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| format!("无法在 Finder 中显示: {}", e))?;
-    Ok(())
+    tauri_plugin_opener::reveal_item_in_dir(&path)
+        .map_err(|e| format!("无法在文件管理器中显示: {}", e))
 }
 
 #[tauri::command]
@@ -456,6 +449,12 @@ async fn verify_deepseek_key(api_key: String, endpoint: Option<String>) -> verif
 #[tauri::command]
 async fn verify_yuandian_key(api_key: String) -> verify::VerifyResult {
     verify::verify_yuandian_key(&api_key).await
+}
+
+/// 2026-06-15 · 验证 MiniMax API key,前端「验证」按钮触发。
+#[tauri::command]
+async fn verify_minimax_key(api_key: String, endpoint: Option<String>) -> verify::VerifyResult {
+    verify::verify_minimax_key(&api_key, endpoint.as_deref()).await
 }
 
 /// 2026-05-25 V0.1.8 · 检测版本更新。
@@ -2398,11 +2397,51 @@ async fn verify_embedding_key(
 // 测试
 // ============================================================================
 
+/// 启动早期(创建 webview 之前)检测系统 WebView 运行时是否可用。
+///
+/// `tauri::webview_version()` 直接探测底层运行时:`Ok` = 可用(直接返回,什么都不做);
+/// `Err` = 缺失/装坏 —— **实际只会在 Windows 缺 Microsoft Edge WebView2 时发生**
+/// (macOS / Linux 系统自带 WebKit,恒 `Ok`)。此时 app 起不了窗口,继续走只会无声闪退,
+/// 所以弹一个**不依赖 webview 的原生对话框**引导用户联网下载,然后干净退出。
+///
+/// 不做 `#[cfg(windows)]` 门控:让本机(mac)`cargo` 门禁也能编译校验这段;mac 上恒 `Ok` → 空操作。
+fn ensure_webview2_runtime() {
+    if tauri::webview_version().is_ok() {
+        return;
+    }
+
+    // 微软官方常青引导安装器固定链接(小巧、自动拉最新;国内一般可直连)。
+    // 想换国内镜像 / 自建落地页(让用户在镜像和官方间选),只改这一个常量即可。
+    const WEBVIEW2_DOWNLOAD_URL: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
+    let choice = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("案件看板 · 缺少运行环境")
+        .set_description(
+            "检测到系统未安装 Microsoft Edge WebView2 运行时,案件看板无法启动。\n\n\
+             点「确定」前往微软官方下载(免费、安全,约几 MB),安装完成后重新打开案件看板即可。\n\
+             若下载很慢,可在浏览器搜索「WebView2 运行时 下载」从国内镜像获取。",
+        )
+        .set_buttons(rfd::MessageButtons::OkCancel)
+        .show();
+
+    if choice == rfd::MessageDialogResult::Ok {
+        let _ = tauri_plugin_opener::open_url(WEBVIEW2_DOWNLOAD_URL, None::<&str>);
+    }
+    // 没有 WebView2,继续构建 Tauri 只会崩 → 直接退出。
+    std::process::exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 2026-05-26 V0.1.11:启动早期装 panic hook,把 panic 信息落到 diagnostic_log
     // ring buffer,反馈通道带出来。
     diagnostic_log::install_panic_hook();
+
+    // 2026-06-15:创建 webview 之前先检测 WebView2 运行时。Windows 缺 WebView2 时
+    // app 根本起不了窗口(老 Win10/弱网/CDN 被墙,装机时没下成)→ 这里弹原生对话框
+    // 引导用户联网下载,然后退出(避免无声闪退、用户一脸懵)。详见 docs/反馈问题排查-2026-06-15.md。
+    ensure_webview2_runtime();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -2542,6 +2581,7 @@ pub fn run() {
             verify_mineru_key,
             verify_paddle_vl_key,
             verify_deepseek_key,
+            verify_minimax_key,
             verify_yuandian_key,
             check_for_update,
             app_version,

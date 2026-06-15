@@ -93,6 +93,22 @@ pub struct Settings {
     /// 云端 LLM API key
     pub cloud_llm_api_key: Option<String>,
 
+    /// 2026-06-15:云端 LLM 后端选择 —— `"deepseek"`(默认/缺省)/ `"minimax"`。
+    /// **纯增量**:老用户(全是 DeepSeek)缺此字段 → 走 deepseek 分支,配置零改动、零重解释。
+    /// 选 minimax 时改读下面一组 `minimax_*` 字段,DeepSeek 的 key/endpoint/档位完全不动。
+    /// 设计见 docs/MiniMax模型接入-2026-06-15.md。
+    pub cloud_llm_backend: Option<String>,
+    /// MiniMax API key(独立于 DeepSeek key,切后端互不覆盖)。
+    pub minimax_api_key: Option<String>,
+    /// MiniMax endpoint base(默认 `https://api.minimaxi.com`;聊天真实路径
+    /// `/v1/text/chatcompletion_v2` 由 LlmConfig 自动补,**不是** OpenAI 兼容的 /v1/chat/completions)。
+    pub minimax_endpoint: Option<String>,
+    /// MiniMax 模型名(**可编辑**自由文本,默认 `MiniMax-M2`)。MiniMax 官方型号名以控制台为准,
+    /// 写错会 404 —— 故做成可填而非写死下拉,「以后适配更多模型」零改代码。
+    pub minimax_model: Option<String>,
+    /// MiniMax key 验证通过时间(坑#11:新 cloud key 必配 verified_at,改 key 重置)。
+    pub minimax_verified_at: Option<String>,
+
     /// 2026-05-24 k:元典法律开放平台 API key — 执行案件查被执行人 / 失信 / 财产线索 用
     /// 申请:https://open.chineselaw.com/
     pub yuandian_api_key: Option<String>,
@@ -188,6 +204,14 @@ impl Settings {
     /// feedback 诊断 / detect_local_readiness 引导)+ 前端 UI 入口即可。
     pub fn effective_ocr_provider(&self) -> &str {
         "cloud"
+    }
+
+    /// 云端 LLM 后端(2026-06-15)。缺省 / 空 / 非法值一律回落 `"deepseek"`(老用户零感知)。
+    pub fn effective_cloud_llm_backend(&self) -> &str {
+        match self.cloud_llm_backend.as_deref().map(str::trim) {
+            Some("minimax") => "minimax",
+            _ => "deepseek",
+        }
     }
 
     /// 云端 OCR 主力(2026-06-12)。`"paddle-vl"` 仅当用户显式选择**且** key 已填才生效,

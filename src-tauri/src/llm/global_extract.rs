@@ -334,17 +334,23 @@ pub async fn extract_combined(
         }
         _ => corpus.to_string(),
     };
-    let body = serde_json::json!({
+    // 2026-06-15:MiniMax 自有协议(/chatcompletion_v2)不支持 response_format:json_object(实测 2013 报错),
+    // 且 M 系列恒思考、思考占 output token → 不发 response_format、把 max_tokens 抬高、温度禁 0.0。
+    let is_minimax = config.endpoint.contains("chatcompletion_v2");
+    let mut body = serde_json::json!({
         "model": config.model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT_COMBINED},
             {"role": "user", "content": user_content},
         ],
-        "max_tokens": 12288,  // 报告 + 表格 大约 5-10K tokens output,留余量
-        "temperature": 0.0,
+        // 报告 + 表格 大约 5-10K tokens output;MiniMax 还要叠思考 token,抬到 32K(M3 支持)。
+        "max_tokens": if is_minimax { 32768 } else { 12288 },
+        "temperature": config.temperature,
         "stream": false,
-        "response_format": {"type": "json_object"},
     });
+    if !is_minimax {
+        body["response_format"] = serde_json::json!({"type": "json_object"});
+    }
 
     let mut req = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(config.timeout_secs * 3))
@@ -381,7 +387,12 @@ pub async fn extract_combined(
         .and_then(|c| c.as_str())
         .ok_or_else(|| LlmError::ResponseFormat("无 choices[0].message.content".into()))?;
 
-    let cleaned = strip_markdown_fence(content);
+    // MiniMax M 系列可能把 <think> 块塞进 content 开头 → 用更鲁棒的剥离(剥 think + 取首{到末})。
+    let cleaned = if is_minimax {
+        crate::llm::extract_json_from_content(content)
+    } else {
+        strip_markdown_fence(content)
+    };
     serde_json::from_str::<CombinedExtractResult>(&cleaned)
         .map_err(|e| LlmError::ContentJson(format!("{}\n---原始---\n{}", e, cleaned)))
 }

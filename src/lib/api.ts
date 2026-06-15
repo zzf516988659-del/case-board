@@ -144,6 +144,17 @@ export function verifyDeepSeekKey(
   });
 }
 
+/** 2026-06-15:在线验证 MiniMax API key(走 /v1/models 鉴权)。 */
+export function verifyMiniMaxKey(
+  apiKey: string,
+  endpoint?: string,
+): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_minimax_key", {
+    apiKey,
+    endpoint: endpoint || null,
+  });
+}
+
 /** 2026-05-25 V0.1.8:在线验证元典(open.chineselaw.com)API key。
  *  消耗 1 次企业搜索配额(用 name=test top_k=1 探测,代价最小)。*/
 export function verifyYuandianKey(apiKey: string): Promise<VerifyResult> {

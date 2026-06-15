@@ -996,10 +996,24 @@ pub fn save_to_desktop(info: &DiagnosticInfo, user_description: &str) -> Result<
     Ok(path)
 }
 
-/// 跨平台拿桌面目录路径
+/// 跨平台拿桌面目录路径。
+///
+/// 2026-06-15:原来只读 `$HOME` 再 join "Desktop" —— **Windows 上 `HOME` 多半没设**
+/// (Windows 用 `USERPROFILE`)→ 直接返回 None → 反馈按钮报「无法定位桌面路径」存不下。
+/// 改用 `directories::UserDirs::desktop_dir()`:Windows 走 Known Folder(能正确处理 OneDrive
+/// 重定向 / 本地化桌面名),mac/Linux 走 ~/Desktop / XDG。多层兜底确保拿到可写目录。
 fn dirs_desktop() -> Option<PathBuf> {
-    // ~/Desktop 在 macOS 一定存在
-    let home = std::env::var("HOME").ok()?;
+    if let Some(ud) = directories::UserDirs::new() {
+        if let Some(d) = ud.desktop_dir() {
+            return Some(d.to_path_buf());
+        }
+        // 个别环境 desktop_dir 为 None(如 Linux 未配 XDG)→ 退到 home/Desktop
+        return Some(ud.home_dir().join("Desktop"));
+    }
+    // 最后兜底:HOME(mac/Linux)/ USERPROFILE(Windows)
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
     Some(PathBuf::from(home).join("Desktop"))
 }
 

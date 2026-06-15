@@ -373,6 +373,13 @@ export interface Settings {
   cloud_llm_endpoint: string | null;
   cloud_llm_model: string | null;
   cloud_llm_api_key: string | null;
+  /** 2026-06-15:云端 LLM 后端 "deepseek"(默认/null)/ "minimax"。选 minimax 改读下面 minimax_* 字段。 */
+  cloud_llm_backend: string | null;
+  minimax_api_key: string | null;
+  minimax_endpoint: string | null;
+  /** MiniMax 模型名(可编辑文本,默认 MiniMax-M2)。型号以 MiniMax 控制台为准。 */
+  minimax_model: string | null;
+  minimax_verified_at: string | null;
   /** 2026-05-24 k:元典法律开放平台 API key(执行案件查被执行人 / 财产线索)*/
   yuandian_api_key: string | null;
   /** 2026-06-01 V0.3:快递100 实时查询 customer + key(快递查询工具用)*/

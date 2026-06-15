@@ -87,12 +87,62 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
         .await
         .map_err(|e| DbError::Connect(e.to_string()))?;
 
+    // 2026-06-15:跑迁移前先对齐 _sqlx_migrations 校验值,根治「migration N ... has been modified」
+    // 启动崩溃。病根 = 双轨发布(私人仓 vs 开源仓)对**同一批已发布迁移**做了去身份化注释改动
+    // (项目名→公开域名、本地路径→泛化),SQL 一字未改但 SHA-384 变了 → 老用户 DB 里
+    // 存的旧校验值对不上新二进制内嵌值 → sqlx 启动中止(release 是 panic=abort,直接闪退)。
+    // 详见 docs/反馈问题排查-2026-06-15.md。
+    reconcile_migration_checksums(&pool).await?;
+
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
         .map_err(|e| DbError::Migrate(e.to_string()))?;
 
     Ok(pool)
+}
+
+/// 把已存在的 `_sqlx_migrations.checksum` 对齐到本二进制内嵌的迁移校验值。
+///
+/// 仅当该表已存在(= 非全新库,跑过至少一次迁移)时才动;逐条只在校验值**不同**时更新并 dlog。
+/// SQL 一字未改(只是注释/项目名漂移),已应用的迁移 sqlx 本就不会重跑 —— 对齐校验值不改变任何
+/// 已执行的 SQL、不动数据,只是消掉「文件被动过」这道与双轨发布天然冲突的 tripwire。
+async fn reconcile_migration_checksums(pool: &SqlitePool) -> Result<(), DbError> {
+    // 全新库还没这张表 → 无需对齐(后续 migrate 会正常建表并全量应用)。
+    let table_exists: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| DbError::Migrate(e.to_string()))?;
+    if table_exists.is_none() {
+        return Ok(());
+    }
+
+    for m in sqlx::migrate!("./migrations").iter() {
+        let embedded: &[u8] = &m.checksum;
+        let stored: Option<(Vec<u8>,)> =
+            sqlx::query_as("SELECT checksum FROM _sqlx_migrations WHERE version = ?1")
+                .bind(m.version)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| DbError::Migrate(e.to_string()))?;
+        if let Some((stored,)) = stored {
+            if stored.as_slice() != embedded {
+                sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = ?2")
+                    .bind(embedded)
+                    .bind(m.version)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| DbError::Migrate(e.to_string()))?;
+                crate::dlog!(
+                    "[db] 迁移 {} 校验值与内嵌不一致,已对齐(注释漂移,SQL 未变)",
+                    m.version
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 数据库相关错误。映射到前端友好的字符串。

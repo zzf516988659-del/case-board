@@ -1056,6 +1056,11 @@ fn build_initial_messages(req: &AgentLoopRequest) -> Vec<ApiMessage> {
 /// 已经以 `/beta/chat/completions` / `/v1/chat/completions` 结尾的不动 — 前者直接用,后者
 /// V0.2 chat 切到 beta(老 stream::run_chat 仍走 v1)。
 fn beta_endpoint(current: &str) -> String {
+    // 2026-06-15:MiniMax 自有协议路径(/v1/text/chatcompletion_v2)就是工具调用路径,
+    // **绝不能**再加 /beta 后缀(会 404)。原样返回。
+    if current.contains("chatcompletion_v2") {
+        return current.to_string();
+    }
     if current.ends_with("/beta/chat/completions") {
         return current.to_string();
     }
