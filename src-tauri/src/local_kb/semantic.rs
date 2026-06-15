@@ -620,6 +620,69 @@ fn collect_corpus(kb_root: &Path) -> Vec<(String, PathBuf, String)> {
             out.push((rel, abs, ck));
         }
     }
+
+    // 2026-06-15 V0.3.18 fix:fallback 扫描整根目录
+    // -------------------------------------------------------
+    // 背景:用户常把已有知识库(按自己的分类组织,如 E:\律师事务部\法律知识库\01_法律文书模板库\)
+    // 接到 caseboard 的 local_kb_root,而不是按 caseboard 默认结构(raw/notes + raw/companies + ...)重建。
+    // 老逻辑只扫 caseboard 默认的 raw/* + wiki/* 子目录,完全不扫根目录下其他自定义分类
+    // → 2467 个 .md/.txt 全部被忽略,索引出 0 文件。
+    //
+    // 行为:仅在 default scan 完全没找到任何文件时(用户明显没按 caseboard 默认结构组织)
+    // 退一步扫描整根目录,排除:
+    //   - _deprecated/* (废止法,不索引)
+    //   - yuandian-cache/SEARCH-* (元典零碎片段,污染召回)
+    //   - 00_ARCHIVE (用户的归档目录,默认跳过,不算 0)
+    //   - 非 .md / .txt (合同 .docx 模板等不进语义索引)
+    //
+    // 如果 default scan 已经找到文件,不动 — 保留作者"小而精"的设计意图,不去重不扩。
+    if out.is_empty() {
+        crate::dlog!(
+            "[kb_index] default scan 0 文件,fallback 扫描整根目录的 .md/.txt"
+        );
+        let skip_dirs: &[&str] = &["_deprecated", "yuandian-cache"];
+        let already_indexed: std::collections::HashSet<String> =
+            out.iter().map(|(r, _, _)| r.clone()).collect();
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            // 跳过元典缓存/废止法/归档 — 但让用户分类目录能进
+            let rel_path = p
+                .strip_prefix(&root)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if skip_dirs.iter().any(|d| {
+                rel_path.starts_with(d) || rel_path.contains(&format!("/{}", d))
+            }) {
+                continue;
+            }
+            if rel_path.starts_with("00_ARCHIVE") {
+                continue;
+            }
+            let Some(file_name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if already_indexed.contains(&rel_path) {
+                continue;
+            }
+            if !is_indexable_file(&rel_path, file_name) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(p) else {
+                continue;
+            };
+            if meta.len() > MAX_FILE_SIZE {
+                continue;
+            }
+            out.push((rel_path, p.to_path_buf(), file_cache_key(&meta)));
+        }
+    }
     out
 }
 
