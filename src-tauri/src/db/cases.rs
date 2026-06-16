@@ -244,6 +244,41 @@ pub async fn list_cases(pool: &SqlitePool) -> Result<Vec<Case>, sqlx::Error> {
         .await
 }
 
+/// 仅当 `case_no` 当前为空/NULL 时才写入(案件资料包合并:只补空白、不覆盖目标方已有值)。
+/// 返回受影响行数(0 = 目标已有非空案号,未动)。
+pub async fn set_case_no_if_empty(
+    pool: &SqlitePool,
+    id: &str,
+    case_no: &str,
+) -> Result<u64, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE cases SET case_no = ?, updated_at = datetime('now') \
+         WHERE id = ? AND (case_no IS NULL OR trim(case_no) = '')",
+    )
+    .bind(case_no)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// 仅当 `case_summary` 当前为空/NULL 时才写入(同上,只补空白)。返回受影响行数。
+pub async fn set_summary_if_empty(
+    pool: &SqlitePool,
+    id: &str,
+    summary: &str,
+) -> Result<u64, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE cases SET case_summary = ?, updated_at = datetime('now') \
+         WHERE id = ? AND (case_summary IS NULL OR trim(case_summary) = '')",
+    )
+    .bind(summary)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// 删除一个案件(级联删除所有关联表:documents/events/contacts/...)。
 pub async fn delete_case(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM cases WHERE id = ?")

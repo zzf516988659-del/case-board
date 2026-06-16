@@ -211,6 +211,39 @@ pub async fn sync_documents_for_case(
     Ok(stats)
 }
 
+/// 插入一条「合并导入」来源的文档(`source='merge'`)。
+///
+/// 用于双人办案案件资料包合并:同事的材料拷进 `<app_data>/merged/<case_id>/` 后,
+/// 以本函数入库。关键:`source='merge'`(≠ 'scan')→ 后续源文件夹重扫 **不会** 把它
+/// 软删(见 [`sync_documents_for_case`] 第 3 步只删 `source='scan'`),所以合并进来的
+/// 材料不会在下次扫描时蒸发。`extraction_status` 默认 'pending' → 等抽取。返回新文档 id。
+pub async fn insert_merged_document(
+    pool: &SqlitePool,
+    case_id: &str,
+    source_path: &str,
+    filename: &str,
+    size_bytes: i64,
+    modified_at: Option<&str>,
+) -> Result<String, sqlx::Error> {
+    let id = Uuid::new_v4().to_string();
+    let cache_key = make_cache_key(modified_at, size_bytes.max(0) as u64);
+    sqlx::query(
+        "INSERT INTO documents \
+         (id, case_id, source_path, filename, size_bytes, modified_at, cache_key, source) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'merge')",
+    )
+    .bind(&id)
+    .bind(case_id)
+    .bind(source_path)
+    .bind(filename)
+    .bind(size_bytes)
+    .bind(modified_at)
+    .bind(&cache_key)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
 /// 列出某案件下的所有活跃文档(2026-05-23 晚十:过滤软删),按 stage 顺序 + filename 字典序。
 pub async fn list_documents_by_case(
     pool: &SqlitePool,

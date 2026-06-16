@@ -167,34 +167,41 @@ function App() {
         if (p) setJustUpdated(p);
       })
       .catch(() => {});
-    checkForUpdate()
-      .then((info) => {
-        setUpdateInfo(info);
-        // 2026-06-11 反馈:每个新版本只自动弹一次,不要每次启动都弹
-        // (开源用户基于旧版二改的,疯狂弹窗会严重打扰)。弹过的版本号记
-        // localStorage;下次远程版本没变就不再弹;发了更新的版本再弹一次。
-        // 用户仍可随时点右下角版本 chip 主动查看更新。
-        const PROMPTED_KEY = "caseboard.update_prompted_version";
-        if (info.has_update && info.latest) {
-          let prompted: string | null = null;
-          try {
-            prompted = localStorage.getItem(PROMPTED_KEY);
-          } catch {
-            /* localStorage 不可用就退回每次弹 */
-          }
-          if (prompted !== info.latest) {
-            setShowUpdateDialog(true);
+    // 2026-06-15 私人自用包防误更新:编译期设 VITE_NO_UPDATE_CHECK=1 → 跳过启动自动检查更新,
+    // 不再弹「发现新版本」。背景:私人自用包带专属功能(「独立」tab),却和公开版共用同一个
+    // lawtools.top/latest.json;公开发版后版本号更高,会把私人版自动更新成公开版、丢掉专属功能
+    // (作者就这么误装过)。公开构建不设此变量 → 照常检查,公开用户正常收到更新。
+    // 手动点右下角版本 chip 仍可主动检查,不受影响。
+    if (import.meta.env.VITE_NO_UPDATE_CHECK !== "1") {
+      checkForUpdate()
+        .then((info) => {
+          setUpdateInfo(info);
+          // 2026-06-11 反馈:每个新版本只自动弹一次,不要每次启动都弹
+          // (开源用户基于旧版二改的,疯狂弹窗会严重打扰)。弹过的版本号记
+          // localStorage;下次远程版本没变就不再弹;发了更新的版本再弹一次。
+          // 用户仍可随时点右下角版本 chip 主动查看更新。
+          const PROMPTED_KEY = "caseboard.update_prompted_version";
+          if (info.has_update && info.latest) {
+            let prompted: string | null = null;
             try {
-              localStorage.setItem(PROMPTED_KEY, info.latest);
+              prompted = localStorage.getItem(PROMPTED_KEY);
             } catch {
-              /* 存不进就下次再弹,无伤 */
+              /* localStorage 不可用就退回每次弹 */
+            }
+            if (prompted !== info.latest) {
+              setShowUpdateDialog(true);
+              try {
+                localStorage.setItem(PROMPTED_KEY, info.latest);
+              } catch {
+                /* 存不进就下次再弹,无伤 */
+              }
             }
           }
-        }
-      })
-      .catch(() => {
-        // 静默失败:断网 / CDN 抽风都不打扰
-      });
+        })
+        .catch(() => {
+          // 静默失败:断网 / CDN 抽风都不打扰
+        });
+    }
   }, []);
 
   // 切 tab 包装:从设置 tab 切走时,如果有未保存改动,先 confirm
@@ -355,12 +362,21 @@ function App() {
       }
     }
     {
-      const filled = !!s.cloud_llm_api_key?.trim();
-      const verified = !!s.deepseek_verified_at;
+      // 2026-06-15:按云端后端校验对应的 key,与后端 effective_cloud_llm_backend 对齐
+      //(仅 cloud_llm_backend === "minimax" 走 MiniMax,其余回落 DeepSeek)。
+      // 此前硬查 DeepSeek 字段,导致 MiniMax 用户点导入被误报「DeepSeek API Key 还未填写」。
+      const isMinimax = s.cloud_llm_backend === "minimax";
+      const filled = isMinimax
+        ? !!s.minimax_api_key?.trim()
+        : !!s.cloud_llm_api_key?.trim();
+      const verified = isMinimax
+        ? !!s.minimax_verified_at
+        : !!s.deepseek_verified_at;
+      const label = `${isMinimax ? "MiniMax" : "DeepSeek"} API Key(云端 LLM)`;
       if (!filled) {
-        issues.push({ label: "DeepSeek API Key(云端 LLM)", reason: "missing" });
+        issues.push({ label, reason: "missing" });
       } else if (!verified) {
-        issues.push({ label: "DeepSeek API Key(云端 LLM)", reason: "unverified" });
+        issues.push({ label, reason: "unverified" });
       }
     }
 

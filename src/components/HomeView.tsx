@@ -50,6 +50,14 @@ import {
   updateTodo,
   updateWorkflowStatus,
 } from "@/lib/api";
+import {
+  ttStatus,
+  ttListItems,
+  ttToggleItem,
+  ttAddItem,
+  ttDeleteItem,
+  type TickTickItem,
+} from "@/lib/ticktickApi";
 import type { Case, Document } from "@/lib/types";
 import { parseJsonArray } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -376,6 +384,12 @@ export function HomeView({ cases, userDisplayName, onPickCase, onImport }: HomeV
             </div>
           )}
 
+          {/* 待办两卡:左=案件待办汇总,右=我的待办(滴答同步)。整个「在办案件」区上方;各自空/未连接时自动隐藏。 */}
+          <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+            <TodoSummary onPickCase={onPickCase} />
+            <MyTodosCard />
+          </div>
+
           <section>
             <div className="mb-4 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -491,8 +505,6 @@ export function HomeView({ cases, userDisplayName, onPickCase, onImport }: HomeV
               >
                 <SortableContext items={sortedIds} strategy={rectSortingStrategy}>
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                    {/* 待办汇总固定置顶第一格(胡彬律师反馈):不进 SortableContext,不可拖、永远在最前 */}
-                    <TodoSummary onPickCase={onPickCase} />
                     {filteredRows.map((row) => (
                       <SortableCaseCard
                         key={row.caseData.id}
@@ -979,6 +991,126 @@ function TodoSummary({ onPickCase }: { onPickCase: (caseId: string) => void }) {
             </div>
           ))}
         </div>
+    </div>
+  );
+}
+
+/** 我的待办(滴答同步)首页卡:跟手机滴答双向同步的个人待办,连接后才显示。
+ *  增删改 + 连接管理在设置页;这里可快速加、打钩。每 30s 刷新一次(后台每分钟同步)。 */
+function MyTodosCard() {
+  const [items, setItems] = useState<TickTickItem[]>([]);
+  const [connected, setConnected] = useState(false);
+  const [title, setTitle] = useState("");
+
+  const reload = async () => {
+    try {
+      const s = await ttStatus();
+      const ok = s.connected && !!s.projectId;
+      setConnected(ok);
+      if (ok) setItems(await ttListItems());
+    } catch {
+      setConnected(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      if (!cancelled) void reload();
+    };
+    tick();
+    const h = window.setInterval(tick, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(h);
+    };
+  }, []);
+
+  const add = async () => {
+    const t = title.trim();
+    if (!t) return;
+    setTitle("");
+    try {
+      await ttAddItem(t, null);
+      await reload();
+    } catch (e) {
+      alert(`添加失败:${e}`);
+    }
+  };
+
+  const toggle = async (it: TickTickItem) => {
+    setItems((arr) => arr.map((x) => (x.id === it.id ? { ...x, done: !x.done } : x)));
+    try {
+      await ttToggleItem(it.id, !it.done);
+    } catch {
+      void reload();
+    }
+  };
+
+  const remove = async (it: TickTickItem) => {
+    setItems((arr) => arr.filter((x) => x.id !== it.id));
+    try {
+      await ttDeleteItem(it.id);
+    } catch {
+      void reload();
+    }
+  };
+
+  // 未连接滴答 → 不占首页格子(去设置页连接)。
+  if (!connected) return null;
+
+  const open = items.filter((i) => !i.done);
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-5">
+      <div className="mb-3 flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold tracking-tight">我的待办</h2>
+        <span className="font-mono text-caption uppercase tracking-wider text-muted-foreground">
+          滴答同步
+        </span>
+      </div>
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void add()}
+          placeholder="加一条(回车),自动同步到手机"
+          className="flex-1 rounded-md border border-border bg-background px-2.5 py-1 text-sm outline-none focus:border-sky-400"
+        />
+      </div>
+      <div className="max-h-64 space-y-0.5 overflow-y-auto pr-1">
+        {open.map((t) => (
+          <div
+            key={t.id}
+            className="group flex items-center gap-2.5 rounded-md px-1.5 py-1 hover:bg-muted/40"
+          >
+            <button
+              type="button"
+              onClick={() => void toggle(t)}
+              aria-label="标记完成"
+              title="打钩完成"
+              className="flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-muted-foreground/50 hover:border-sky-600 hover:bg-sky-50"
+            />
+            <span className="flex-1 truncate text-sm text-foreground">{t.title}</span>
+            {t.due && (
+              <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                {t.due.slice(5, 10)}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => void remove(t)}
+              title="删除"
+              className="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-red-600 group-hover:opacity-100"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        {open.length === 0 && (
+          <p className="px-1 py-2 text-xs text-muted-foreground">暂无待办,上面加一条。</p>
+        )}
+      </div>
     </div>
   );
 }

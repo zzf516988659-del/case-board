@@ -1280,6 +1280,49 @@ export function exportKbToZip(outputPath: string): Promise<KbExportResult> {
   return invoke<KbExportResult>("export_kb_to_zip", { outputPath });
 }
 
+// ===== 案件资料包(双人办案材料合并)=====
+
+/** 导入资料包预览(对应 Rust `case_bundle::BundlePreview`)。 */
+export interface CaseBundlePreview {
+  name: string;
+  caseNo: string | null;
+  parties: string | null;
+  summary: string | null;
+  fileCount: number;
+  /** 按案号自动匹配到的本地同一案件(建议合并目标),无匹配为 null。 */
+  suggestedCaseId: string | null;
+  suggestedCaseName: string | null;
+}
+
+/** 合并结果(对应 Rust `case_bundle::MergeReport`)。 */
+export interface CaseMergeReport {
+  targetCaseId: string;
+  targetCaseName: string;
+  createdNew: boolean;
+  added: number;
+  deduped: number;
+  skipped: number;
+  filledFields: string[];
+}
+
+/** 把一个案件导出成 zip 资料包,返回打进包的文件数。 */
+export function exportCaseBundle(caseId: string, outputPath: string): Promise<number> {
+  return invoke<number>("export_case_bundle", { caseId, outputPath });
+}
+
+/** 预览资料包 + 按案号建议本地合并目标。 */
+export function previewCaseBundle(zipPath: string): Promise<CaseBundlePreview> {
+  return invoke<CaseBundlePreview>("preview_case_bundle", { zipPath });
+}
+
+/** 合并资料包进目标案件(targetCaseId 为 null → 新建)。 */
+export function mergeCaseBundle(
+  zipPath: string,
+  targetCaseId: string | null,
+): Promise<CaseMergeReport> {
+  return invoke<CaseMergeReport>("merge_case_bundle", { zipPath, targetCaseId });
+}
+
 /** prune_yuandian_cache 回执(对应 Rust `local_kb::cache::PruneStats`)。 */
 export interface KbPruneStats {
   /** 清掉的 index 条目数 */

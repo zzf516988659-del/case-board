@@ -276,7 +276,7 @@ impl LlmConfig {
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .unwrap_or("MiniMax-M2")
+                    .unwrap_or("MiniMax-M2.7")
                     .to_string();
                 // M 系列恒思考,抽取也不能用 0.0(会死循环);0.3 兼顾确定性与可用。
                 return Self {

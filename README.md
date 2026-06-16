@@ -174,7 +174,7 @@ pnpm build                           # 前端 TypeScript + Vite 检查
 
 1. `src-tauri/src/lib.rs` 里 3 处 `Command::new("open")`(打开文件 / 目录 / URL)→ Windows 需换 `explorer` / `cmd /c start`,或统一改用 [tauri-plugin-opener](https://tauri.app/plugin/opener/)
 2. `src-tauri/src/lib.rs` 用 macOS 自带 `textutil` 抽 Word/RTF 纯文本 → 需替代实现(Word **导出**已是纯 Rust 原生 OOXML,见 `src-tauri/src/export.rs`,不受影响)
-3. `scripts/release.sh` 出 dmg 是 macOS 专属(`hdiutil` / `osascript`)→ Windows 直接 `pnpm tauri build` 产 msi/nsis 即可
+3. `scripts/release.sh` 出 dmg 是 macOS 专属(`hdiutil` / `osascript`)→ Windows 直接 `pnpm tauri build` 产 msi/nsis 即可。⚠️ Windows 下务必走 `pnpm tauri build`(只想要 exe、不打安装包可加 `--no-bundle`),**别用 `cargo build --release`** —— 它不跑 tauri-cli 的 codegen,前端 `dist/` 不会嵌进 exe,产物能编过但启动白屏、WebView 报 `localhost refused`(感谢 [@zzf516988659-del](https://github.com/zzf516988659-del) 反馈,issue #2)
 4. Word 导出用的中文字体(仿宋 / 黑体 / 方正小标宋)按字体名写入 docx,Windows 上前两者系统自带,效果需实测
 
 ## 项目结构

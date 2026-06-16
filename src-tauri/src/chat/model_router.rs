@@ -96,7 +96,7 @@ pub fn route_model(task: TaskType, user_message: &str, settings: &Settings) -> M
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or("MiniMax-M2");
+            .unwrap_or("MiniMax-M2.7");
         return ModelChoice::from_minimax(model);
     }
 

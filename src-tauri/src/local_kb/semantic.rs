@@ -107,6 +107,13 @@ pub struct KbFileIndex {
 pub struct KbIndex {
     /// `<endpoint>|<model>`;变了 → 整库失效重建(维度也会变)。
     pub signature: String,
+    /// 2026-06-15:索引对应的 KB 根目录(canonical 绝对路径字符串)。用户改了
+    /// `settings.local_kb_root` 后,旧索引里的 rel_path 已对不上新根,必须视作废索引
+    /// 全量重建,否则 `search_local_kb` 会召回旧根的内容(用户视角=搜到不存在的文件)。
+    /// 用字符串而非 PathBuf:避开 Windows 反斜杠/正斜杠差异。`#[serde(default)]` 兼容老索引
+    /// 文件(无此字段 → 空串 → 必定视为根不一致 → 一次性全量重建)。
+    #[serde(default)]
+    pub kb_root: String,
     pub files: Vec<KbFileIndex>,
 }
 
@@ -449,6 +456,39 @@ async fn load_index() -> KbIndex {
     }
 }
 
+/// 当前 KB 根的 canonical 绝对路径字符串(失败退回原路径)。Windows 上 canonicalize
+/// 还会归一化盘符大小写,顺带消除"同根不同大小写"误判。
+fn canonical_root(kb_root: &Path) -> String {
+    kb_root
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| kb_root.to_string_lossy().into_owned())
+}
+
+/// 加载索引,并在「KB 根已切换」时把旧索引视作废索引(清空 signature+files),避免旧根的
+/// rel_path 残留导致 `search_local_kb` 召回不存在的文件。返回 (索引, 当前根 canonical 字符串)。
+/// 两个建索引入口(手动 build_or_update_index + 自动 maybe_auto_index)共用,确保两条路径
+/// 都在根切换时全量重建,不只修其一。
+async fn load_index_for_root(kb_root: &Path) -> (KbIndex, String) {
+    let current_root = canonical_root(kb_root);
+    let mut existing = load_index().await;
+    if existing.kb_root != current_root {
+        if !existing.files.is_empty() {
+            crate::dlog!(
+                "[kb-semantic] KB 根切换:{} → {},清空旧索引 {} 个文件,全量重建",
+                existing.kb_root,
+                current_root,
+                existing.files.len()
+            );
+        }
+        existing.signature.clear();
+        existing.files.clear();
+        existing.kb_root = current_root.clone();
+    }
+    (existing, current_root)
+}
+
 /// 内存缓存:索引可能上百 MB,每次检索都从磁盘读+parse 会卡几秒。
 /// 缓存按索引文件 mtime 失效;重建后 `invalidate_cache()` 主动清,下次检索重载一次。
 struct CacheEntry {
@@ -620,6 +660,47 @@ fn collect_corpus(kb_root: &Path) -> Vec<(String, PathBuf, String)> {
             out.push((rel, abs, ck));
         }
     }
+
+    // ④ 兜底:默认目录一个文件都没扫到(用户把自己按分类组织的现成知识库直接接进来,
+    //    而非按 caseboard 的 raw/* + wiki/* 结构重建)→ 退一步扫整根目录的 .md/.txt。
+    //    仅在 out 完全为空时触发:走默认结构的用户 out 非空,永不进入,零回归。
+    //    skip 用分隔符无关的纯子串 contains(与上面 notes 的 `_deprecated` 约定一致),
+    //    否则 Windows 反斜杠路径下嵌套目录的过滤会失效。
+    if out.is_empty() {
+        crate::dlog!("[kb-semantic] 默认目录扫到 0 文件,fallback 扫描整根目录的 .md/.txt");
+        let skip_dirs: &[&str] = &["_deprecated", "yuandian-cache", "00_ARCHIVE"];
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(file_name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let rel = p
+                .strip_prefix(&root)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| p.to_string_lossy().into_owned());
+            if skip_dirs.iter().any(|d| rel.contains(d)) {
+                continue;
+            }
+            if !is_indexable_file(&rel, file_name) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(p) else {
+                continue;
+            };
+            if meta.len() > MAX_FILE_SIZE {
+                continue;
+            }
+            out.push((rel, p.to_path_buf(), file_cache_key(&meta)));
+        }
+    }
+
     out
 }
 
@@ -674,7 +755,8 @@ pub async fn build_or_update_index(
     use tauri::Emitter;
 
     let sig = crate::embedding::index::signature(endpoint, model);
-    let existing = load_index().await;
+    // 根切换 → 全量重建(见 load_index_for_root)。
+    let (existing, current_root) = load_index_for_root(kb_root).await;
     let corpus = collect_corpus(kb_root);
     let current: Vec<(String, String)> = corpus
         .iter()
@@ -757,6 +839,7 @@ pub async fn build_or_update_index(
         // 每个文件完成即落盘:长任务可中断续跑 + 文件可见增长。
         let snapshot = KbIndex {
             signature: sig.clone(),
+            kb_root: current_root.clone(),
             files: files.clone(),
         };
         if let Err(e) = save_index(&snapshot).await {
@@ -772,6 +855,7 @@ pub async fn build_or_update_index(
 
     let index = KbIndex {
         signature: sig,
+        kb_root: current_root,
         files,
     };
     // 兜底再存一次(纯复用、无 pending 时上面循环不落盘,这里确保 signature/集合落地)。
@@ -836,7 +920,8 @@ pub async fn auto_update_index(
         return; // 已有自动索引在跑
     }
     let sig = crate::embedding::index::signature(endpoint, model);
-    let existing = load_index().await;
+    // 根切换 → 清空旧索引,避免 plan_update 拿旧根 rel_path 误判"已索引"而跳过重建。
+    let (existing, _current_root) = load_index_for_root(kb_root).await;
     let corpus = collect_corpus(kb_root);
     let current: Vec<(String, String)> = corpus
         .iter()

@@ -23,8 +23,10 @@ import {
   ArrowLeft,
   Calculator,
   Calendar,
+  Combine,
   Gavel,
   Hash,
+  ListChecks,
   Scale,
   Share2,
   TrendingUp,
@@ -37,8 +39,10 @@ import { LawyerFeeCalculator } from "./calculators/LawyerFeeCalculator";
 import { LitigationFeeCalculator } from "./calculators/LitigationFeeCalculator";
 import { NumberConverter } from "./calculators/NumberConverter";
 import { KbShareTool } from "./KbShareTool";
+import { CaseBundleTool } from "./CaseBundleTool";
 import { CourtSmsTool } from "./CourtSmsTool";
 import { CourierTool } from "./CourierTool";
+import { TickTickPanel } from "@/components/TickTickPanel";
 import { LegalToolCard } from "./components/LegalToolCard";
 
 type LegalToolId =
@@ -48,8 +52,10 @@ type LegalToolId =
   | "legalfee"
   | "interest"
   | "kbshare"
+  | "casebundle"
   | "courtsms"
-  | "courier";
+  | "courier"
+  | "ticktick";
 
 interface LegalTool {
   id: LegalToolId;
@@ -134,6 +140,31 @@ export function ToolsModule({
     );
   }
 
+  // ──────────── 案件资料包合并(双人办案,自带视图) ────────────
+  if (activeTool === "casebundle") {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回工具列表
+          </button>
+          <span className="text-muted-foreground/40">·</span>
+          <h2 className="text-sm font-medium text-foreground">案件资料包合并(双人办案)</h2>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-3xl px-6 py-6">
+            <CaseBundleTool />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   // ──────────── 法院短信处理(独立于计算器,自带视图) ────────────
   if (activeTool === "courtsms") {
     return (
@@ -178,6 +209,31 @@ export function ToolsModule({
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="mx-auto max-w-3xl px-6 py-6">
             <CourierTool />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ──────────── 滴答清单 ToDo 同步(独立于计算器,自带视图) ────────────
+  if (activeTool === "ticktick") {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回工具列表
+          </button>
+          <span className="text-muted-foreground/40">·</span>
+          <h2 className="text-sm font-medium text-foreground">滴答清单 ToDo 同步</h2>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-3xl px-6 py-6">
+            <TickTickPanel />
           </div>
         </div>
       </main>
@@ -266,6 +322,30 @@ export function ToolsModule({
                 title="本地知识库共享"
                 desc="导出 / 导入元典缓存资料包(.zip),团队互通、互相省积分"
                 onClick={() => setActiveTool("kbshare")}
+              />
+              <LegalToolCard
+                icon={Combine}
+                title="案件资料包(双人办案合并)"
+                desc="导出某案件给合办律师 / 导入对方资料包合并进同一案件,材料按内容去重、并集、不冲突"
+                onClick={() => setActiveTool("casebundle")}
+              />
+            </div>
+          </section>
+
+          {/* 日程 / 待办同步 */}
+          <section className="space-y-2">
+            <div className="px-1">
+              <h2 className="text-sm font-semibold text-foreground">日程 / 待办同步</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                跟手机滴答清单双向同步个人待办,首页展示;用你自己注册的滴答应用连自己账号
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <LegalToolCard
+                icon={ListChecks}
+                title="滴答清单 ToDo 同步"
+                desc="连接手机滴答(收件箱),双向同步待办、勾完成两边同步;每分钟 + 切回 App 自动同步"
+                onClick={() => setActiveTool("ticktick")}
               />
             </div>
           </section>

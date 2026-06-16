@@ -13,10 +13,12 @@ pub mod lifecycle;
 pub mod llm;
 pub mod local_kb;
 // 私人专属功能 Rust 侧(双轨发布模型)。开源仓此文件为桩(命令返回 Err),照样编译。
+pub mod case_bundle;
 pub mod private;
 pub mod settings;
 pub mod team;
 pub mod telemetry;
+pub mod ticktick;
 pub mod update;
 pub mod verify;
 pub mod yuandian;
@@ -2263,6 +2265,45 @@ async fn export_kb_to_zip(output_path: String) -> Result<local_kb::share::Export
     .map_err(|e| e.to_string())
 }
 
+// ========== 案件资料包(双人办案材料合并)==========
+
+/// 把一个案件导出成 zip 资料包(manifest + 源文件),给同事导入合并。
+#[tauri::command]
+async fn export_case_bundle(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    output_path: String,
+) -> Result<usize, String> {
+    case_bundle::export_case_bundle(pool.inner(), &case_id, std::path::Path::new(&output_path))
+        .await
+}
+
+/// 预览资料包内容 + 按案号建议本地合并目标案件。
+#[tauri::command]
+async fn preview_case_bundle(
+    pool: tauri::State<'_, SqlitePool>,
+    zip_path: String,
+) -> Result<case_bundle::BundlePreview, String> {
+    case_bundle::preview_case_bundle(pool.inner(), std::path::Path::new(&zip_path)).await
+}
+
+/// 合并资料包进目标案件(`target_case_id` 为空 → 新建)。按内容去重、单向并集、永不冲突。
+#[tauri::command]
+async fn merge_case_bundle(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    zip_path: String,
+    target_case_id: Option<String>,
+) -> Result<case_bundle::MergeReport, String> {
+    case_bundle::merge_case_bundle(
+        &app,
+        pool.inner(),
+        std::path::Path::new(&zip_path),
+        target_case_id,
+    )
+    .await
+}
+
 /// P2 · 清理「搜索 / 向量类、且超 `max_age_days` 天」的元典缓存(.md + .raw.json + index 条目)。
 /// **只清检索列表**,法规 / 法条 / 案例**全文详情**与企业类一律不动(是复用资产)。
 /// 显式触发(Settings 维护按钮),绝不自动跑(§7 删除需确认)。
@@ -2517,6 +2558,9 @@ pub fn run() {
             // 冷启动且量大则跳过 + 提示去设置手动重建,见 semantic::auto_update_index)。
             spawn_kb_auto_index(app.handle().clone());
 
+            // 滴答清单后台自动同步(每 60s 一拍;仅在已连接 + 开了自动同步时才真同步)。
+            ticktick::spawn_auto_sync(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2616,6 +2660,9 @@ pub fn run() {
             create_local_kb,
             import_kb_from_zip,
             export_kb_to_zip,
+            export_case_bundle,
+            preview_case_bundle,
+            merge_case_bundle,
             prune_yuandian_cache,
             build_local_kb_semantic_index,
             get_local_kb_index_stats,
@@ -2626,11 +2673,18 @@ pub fn run() {
             // 私人专属功能(双轨发布模型;开源仓为桩命令)
             private::telemetry_get,
             private::reset_yuandian_credits,
+            // 滴答清单(TickTick)双向同步(公开功能)
+            ticktick::ticktick_call,
         ])
-        .on_window_event(|_window, event| {
-            // App 退出时清理子进程(llama-server)
-            if let tauri::WindowEvent::Destroyed = event {
-                lifecycle::shutdown();
+        .on_window_event(|window, event| {
+            match event {
+                // App 退出时清理子进程(llama-server)
+                tauri::WindowEvent::Destroyed => lifecycle::shutdown(),
+                // 切回 App(窗口重新获得焦点)→ 触发一次滴答同步(已连接 + 开了自动同步才真跑)。
+                tauri::WindowEvent::Focused(true) => {
+                    ticktick::sync_on_focus(window.app_handle().clone());
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())

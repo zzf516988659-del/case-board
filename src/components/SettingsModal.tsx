@@ -797,26 +797,26 @@ export function SettingsModal({
                       )}
                     </Field>
                     <Field
-                      label="模型名"
-                      hint="可编辑。以 MiniMax 控制台实际型号为准(写错会报 404);留空默认 MiniMax-M2"
+                      label="模型档位"
+                      hint="按需选择:M2.7 轻量便宜,M2.7-highspeed 速度加倍,M3 强推理(1M 上下文)"
                     >
-                      <input
-                        type="text"
-                        list="minimax-model-presets"
-                        value={settings.minimax_model ?? ""}
+                      <select
+                        value={normalizeMinimaxModel(settings.minimax_model)}
                         onChange={(e) =>
-                          updateField("minimax_model", e.target.value || null)
+                          updateField("minimax_model", e.target.value)
                         }
-                        placeholder="MiniMax-M2"
                         className={inputCls}
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
-                      <datalist id="minimax-model-presets">
-                        <option value="MiniMax-M2" />
-                        <option value="MiniMax-M2.7" />
-                        <option value="MiniMax-M3" />
-                      </datalist>
+                      >
+                        <option value="MiniMax-M2.7">
+                          MiniMax-M2.7(轻量档,60 TPS,推荐日常)
+                        </option>
+                        <option value="MiniMax-M2.7-highspeed">
+                          MiniMax-M2.7-highspeed(高速版,100 TPS)
+                        </option>
+                        <option value="MiniMax-M3">
+                          MiniMax-M3(强推理档,1M 上下文,复杂法律分析)
+                        </option>
+                      </select>
                     </Field>
                     {/* Endpoint 默认 https://api.minimaxi.com;聊天真实路径
                         /v1/text/chatcompletion_v2 由后端自动补 → 不暴露输入框。 */}
@@ -1143,6 +1143,21 @@ const inputCls = cn(
   "transition-[border-color,box-shadow]",
   "focus:outline-none focus:border-foreground focus:ring-1 focus:ring-foreground/20",
 );
+
+/**
+ * MiniMax 模型档位归一:历史 settings 里可能是 "minimax-M3"(小写 m)或 null/空,
+ * select 的 value 必须精确匹配某个 option.value 才能高亮。旧的 "MiniMax-M2" 已被
+ * M2.7 取代,统一归并到 M2.7(后端 null 默认也已对齐 M2.7)。无法识别的值(用户
+ * 手填过的)原样返回 —— select 不高亮,用户重选一次即可。
+ */
+function normalizeMinimaxModel(raw: string | null | undefined): string {
+  if (!raw) return "MiniMax-M2.7";
+  const lower = raw.trim().toLowerCase();
+  if (lower === "minimax-m2.7" || lower === "minimax-m2") return "MiniMax-M2.7";
+  if (lower === "minimax-m2.7-highspeed") return "MiniMax-M2.7-highspeed";
+  if (lower === "minimax-m3") return "MiniMax-M3";
+  return raw;
+}
 
 /** 验证状态图标:ok=绿勾 / fail=红叉 / 其他=不显示 */
 function VerifyStatusIcon({ status }: { status: VerifyStatus }) {
