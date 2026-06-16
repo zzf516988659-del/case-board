@@ -23,6 +23,7 @@ import {
   ArrowLeft,
   Calculator,
   Calendar,
+  CalendarClock,
   Combine,
   Gavel,
   Hash,
@@ -42,6 +43,8 @@ import { KbShareTool } from "./KbShareTool";
 import { CaseBundleTool } from "./CaseBundleTool";
 import { CourtSmsTool } from "./CourtSmsTool";
 import { CourierTool } from "./CourierTool";
+import { FeishuCalendarTool } from "./FeishuCalendarTool";
+import { CourtFilingTool } from "./CourtFilingTool";
 import { TickTickPanel } from "@/components/TickTickPanel";
 import { LegalToolCard } from "./components/LegalToolCard";
 
@@ -55,7 +58,9 @@ type LegalToolId =
   | "casebundle"
   | "courtsms"
   | "courier"
-  | "ticktick";
+  | "ticktick"
+  | "feishu"
+  | "courtfiling";
 
 interface LegalTool {
   id: LegalToolId;
@@ -240,6 +245,56 @@ export function ToolsModule({
     );
   }
 
+  // ──────────── 飞书日历(独立于计算器,自带视图) ────────────
+  if (activeTool === "feishu") {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回工具列表
+          </button>
+          <span className="text-muted-foreground/40">·</span>
+          <h2 className="text-sm font-medium text-foreground">飞书日历</h2>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-3xl px-6 py-6">
+            <FeishuCalendarTool />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ──────────── 辅助在线立案(独立于计算器,自带视图) ────────────
+  if (activeTool === "courtfiling") {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回工具列表
+          </button>
+          <span className="text-muted-foreground/40">·</span>
+          <h2 className="text-sm font-medium text-foreground">辅助在线立案</h2>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-3xl px-6 py-6">
+            <CourtFilingTool />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   // ────────────────────────── 工具视图态 ──────────────────────────
   if (tool) {
     return (
@@ -347,6 +402,12 @@ export function ToolsModule({
                 desc="连接手机滴答(收件箱),双向同步待办、勾完成两边同步;每分钟 + 切回 App 自动同步"
                 onClick={() => setActiveTool("ticktick")}
               />
+              <LegalToolCard
+                icon={CalendarClock}
+                title="飞书日历"
+                desc="复用本机 lark-cli 登录态拉飞书日历,开启后首页显示飞书月历;需先装并登录 lark-cli"
+                onClick={() => setActiveTool("feishu")}
+              />
             </div>
           </section>
 
@@ -370,6 +431,12 @@ export function ToolsModule({
                 title="快递查询"
                 desc="查 EMS / 顺丰等物流轨迹(寄送达、材料追踪);需配快递100 key"
                 onClick={() => setActiveTool("courier")}
+              />
+              <LegalToolCard
+                icon={Gavel}
+                title="辅助在线立案(实验)"
+                desc="一张网自动填到预览页停、不自动提交;配置+律师档案在此,发起在案件详情页;需本机 Python 运行时"
+                onClick={() => setActiveTool("courtfiling")}
               />
             </div>
           </section>

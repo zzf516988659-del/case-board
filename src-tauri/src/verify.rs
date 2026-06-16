@@ -236,6 +236,78 @@ pub async fn verify_minimax_key(api_key: &str, endpoint: Option<&str>) -> Verify
     ))
 }
 
+/// 验证「通用 OpenAI 兼容」后端(智谱 GLM / 小米 MiMo / 自定义 · 2026-06-16)。
+///
+/// 各家服务商 `/models` 路径不统一(GLM 是 `/api/paas/v4`,无标准 `/v1`),故**直接打一发最小
+/// chat completion**(`max_tokens:16`)—— 一次验证 key + 接口地址 + 模型名三者是否都对。
+/// 区分失败类型,便于用户定位:
+///   - 401/403 → key 无效
+///   - 404 / 400 → 接口地址或模型名可能不对(可在设置里改后重试)
+pub async fn verify_openai_compat_key(api_key: &str, endpoint: &str, model: &str) -> VerifyResult {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return VerifyResult::fail("API Key 为空");
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return VerifyResult::fail("模型名为空(请在下方填具体型号,如 glm-4.6)");
+    }
+    let url = crate::llm::compat_chat_url(endpoint);
+    if url.is_empty() {
+        return VerifyResult::fail("接口地址为空");
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return VerifyResult::fail(format!("HTTP 客户端创建失败: {}", e)),
+    };
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 16,
+        "stream": false,
+    });
+
+    let resp = match client
+        .post(&url)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return VerifyResult::fail(format!("网络错误: {}", e)),
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        return VerifyResult::ok();
+    }
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        return VerifyResult::fail("API Key 无效或已过期(401/403)");
+    }
+    let snippet = resp
+        .text()
+        .await
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect::<String>();
+    if code == 404 || code == 400 {
+        return VerifyResult::fail(format!(
+            "接口地址或模型名可能不对({}),可在设置里修改后重试 · {}",
+            code, snippet
+        ));
+    }
+    VerifyResult::fail(format!("HTTP {} · {}", code, snippet))
+}
+
 /// 验证元典(open.chineselaw.com)API key。
 ///
 /// 两段探测:

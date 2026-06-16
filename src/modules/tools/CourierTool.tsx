@@ -18,6 +18,9 @@ import {
   Trash2,
   ChevronDown,
   ChevronRight,
+  Settings as SettingsIcon,
+  ExternalLink,
+  Save,
 } from "lucide-react";
 
 import {
@@ -25,8 +28,12 @@ import {
   refreshExpressTracks,
   queryExpress,
   deleteExpressTrack,
+  getSettings,
+  saveSettings,
+  openUrl,
   type ExpressTrack,
 } from "@/lib/api";
+import type { Settings } from "@/lib/types";
 import { toast } from "@/components/ui/toast";
 import { confirmDialog } from "@/lib/dialog";
 
@@ -153,8 +160,30 @@ export function CourierTool() {
   const [querying, setQuerying] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  // 打开面板:先读本地,再自动刷新在途单号(40 天内免费)
+  // 快递100 接口配置(2026-06-16:从设置页迁到这里,就近配置 customer + key)
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [custCfg, setCustCfg] = useState("");
+  const [keyCfg, setKeyCfg] = useState("");
+  const [savingCfg, setSavingCfg] = useState(false);
+  const [cfgDirty, setCfgDirty] = useState(false);
+  const [cfgOpen, setCfgOpen] = useState(false);
+  const configured = !!(
+    settings?.kuaidi100_customer?.trim() && settings?.kuaidi100_key?.trim()
+  );
+
+  // 打开面板:读 settings(快递100 配置)+ 本地单号 + 自动刷新在途单号(40 天内免费)
   useEffect(() => {
+    getSettings()
+      .then((s) => {
+        setSettings(s);
+        setCustCfg(s.kuaidi100_customer ?? "");
+        setKeyCfg(s.kuaidi100_key ?? "");
+        // 未配置则展开配置区提示填写,已配置则收起
+        setCfgOpen(
+          !(s.kuaidi100_customer?.trim() && s.kuaidi100_key?.trim()),
+        );
+      })
+      .catch(() => {});
     listExpressTracks()
       .then(setTracks)
       .catch(() => {});
@@ -162,6 +191,26 @@ export function CourierTool() {
       .then(setTracks)
       .catch(() => {});
   }, []);
+
+  const saveKuaidiCfg = async () => {
+    if (!settings) return;
+    setSavingCfg(true);
+    try {
+      const next: Settings = {
+        ...settings,
+        kuaidi100_customer: custCfg.trim() || null,
+        kuaidi100_key: keyCfg.trim() || null,
+      };
+      await saveSettings(next);
+      setSettings(next);
+      setCfgDirty(false);
+      toast("快递100 配置已保存", "info");
+    } catch (e) {
+      toast(`保存失败:${e}`, "error");
+    } finally {
+      setSavingCfg(false);
+    }
+  };
 
   const handleQuery = async () => {
     if (!num.trim()) return;
@@ -212,9 +261,93 @@ export function CourierTool() {
     <div className="space-y-4">
       <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-800 dark:border-sky-800/50 dark:bg-sky-950/30 dark:text-sky-200">
         输单号查物流并<strong>持续跟踪</strong>:打开本页自动刷新在途单号(同单号 40 天内重查免费),
-        已签收停更,超 30 天归档。需先在<strong>设置 → 快递100</strong>填 customer + key;
+        已签收停更,超 30 天归档。需先在下方<strong>快递100 接口配置</strong>填 customer + key;
         顺丰 / 中通查询需填<strong>收寄件人手机号</strong>(后 4 位即可)。
       </div>
+
+      {/* 快递100 接口配置(2026-06-16:从设置页迁来,就近配置)*/}
+      <details
+        open={cfgOpen}
+        onToggle={(e) => setCfgOpen(e.currentTarget.open)}
+        className="rounded-lg border border-border bg-card"
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-xs font-medium text-foreground">
+          <SettingsIcon className="size-3.5 text-muted-foreground" />
+          快递100 接口配置
+          <span
+            className={`rounded px-1.5 py-0.5 text-caption font-medium ${
+              configured
+                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+            }`}
+          >
+            {configured ? "已配置" : "未配置 · 先填这里才能查询"}
+          </span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              openUrl("https://api.kuaidi100.com/").catch(() => {});
+            }}
+            className="ml-auto inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2 py-0.5 text-caption font-medium text-sky-700 hover:bg-sky-100 dark:border-sky-800/50 dark:bg-sky-950/30 dark:text-sky-300"
+          >
+            <ExternalLink className="size-3" />
+            申请 customer / key
+          </button>
+        </summary>
+        <div className="space-y-3 border-t border-border px-4 py-3">
+          <div className="space-y-1">
+            <label className="block text-caption text-muted-foreground">
+              customer(授权码)
+            </label>
+            <input
+              type="text"
+              value={custCfg}
+              onChange={(e) => {
+                setCustCfg(e.target.value);
+                setCfgDirty(true);
+              }}
+              placeholder="快递100 后台的 customer"
+              autoComplete="off"
+              className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm placeholder:text-muted-foreground/50 focus:border-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-caption text-muted-foreground">
+              key(授权 key)
+            </label>
+            <input
+              type="password"
+              value={keyCfg}
+              onChange={(e) => {
+                setKeyCfg(e.target.value);
+                setCfgDirty(true);
+              }}
+              placeholder="快递100 后台的 key"
+              autoComplete="off"
+              className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm placeholder:text-muted-foreground/50 focus:border-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <span className="text-caption text-muted-foreground">
+              只存本机,不上传任何地方
+            </span>
+            <button
+              type="button"
+              onClick={saveKuaidiCfg}
+              disabled={savingCfg || !cfgDirty || !settings}
+              className="inline-flex items-center gap-1.5 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+            >
+              {savingCfg ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Save className="size-3.5" />
+              )}
+              保存
+            </button>
+          </div>
+        </div>
+      </details>
 
       {/* 添加 */}
       <div className="flex flex-wrap items-end gap-2">

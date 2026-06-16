@@ -83,16 +83,19 @@ impl SubmitThrottle {
     }
 }
 
-/// 判断这个文件名是否会触发**云端 OCR 提交**(走 MinerU API)。
+/// 判断这个文件名是否会触发**云端 OCR / 文档解析提交**(走 MinerU API)。
 ///
-/// 只有 PDF / 图片**且** cloud_enabled 时才占 MinerU 配额。
-/// docx / txt / md / html 走 textutil / 直接读,不消耗 MinerU 配额,不必节流。
+/// PDF / 图片 / office 文档(doc/rtf/odt/ppt/xls,2026-06-16 起统一走 MinerU 云端解析)
+/// **且** cloud_enabled 时才占 MinerU 配额。docx / txt / md / html 走原生解析 / 直接读,
+/// 不消耗 MinerU 配额,不必节流。
 ///
-/// 注意:PDF 可能 pdftotext 成功无需 OCR fallback,这种情况节流是"误打"——
+/// 注意:PDF 可能 pdf-inspector 直抽成功无需 OCR fallback,这种情况节流是"误打"——
 /// 多 sleep 1.4s 而已,可接受(简化判断,避免在调度层重复 PDF 文本探测)。
 fn might_hit_mineru(filename: &str) -> bool {
     let f = filename.to_lowercase();
-    f.ends_with(".pdf") || super::extractor::is_ocr_image_ext(&f)
+    f.ends_with(".pdf")
+        || super::extractor::is_ocr_image_ext(&f)
+        || super::extractor::is_office_cloud_ext(&f)
 }
 
 /// 进度事件 payload,emit 给前端的 "extraction_progress" 事件。
@@ -192,6 +195,29 @@ pub fn spawn_extraction(
     tauri::async_runtime::spawn(async move {
         if let Err(e) = run_extraction(&app, &pool, &case_id, &documents, run_analysis).await {
             crate::dlog!("[pipeline] case {} 抽取 fatal error: {}", case_id, e);
+        }
+    });
+}
+
+/// 批量后台抽取:**多个案件按顺序排队**跑(case A 全抽完 → 再 case B),而不是每案各起一个并发 pipeline。
+///
+/// 2026-06-16(反馈 ea761d3d 大量 OCR 429):旧的多案件导入对每个案件各调一次 `spawn_extraction`,
+/// 每个内部又 `buffer_unordered(8)` → 导入 N 案 = N 个 pipeline 并发 × 各 8 文档 = 最多 **N×8 并发 OCR**,
+/// 直接打爆 MinerU 免费限流(50 files/min、300 requests/min)。
+/// 这里改成**单个后台任务里逐案 `await run_extraction`**:同一时刻只有一个案件在抽(案内仍 ≤8 并发,
+/// 约 32 文档/min,在 MinerU 50/min 之下)。配合「导入上限 3 案」+ 建议用额度更高的 PaddleOCR,基本规避限流。
+/// 每个案件的进度仍走各自 `extraction_progress`(case_id 标记),前端按案件订阅不受影响。
+pub fn spawn_extraction_batch(
+    app: AppHandle,
+    pool: SqlitePool,
+    jobs: Vec<(String, Vec<Document>)>,
+    run_analysis: bool,
+) {
+    tauri::async_runtime::spawn(async move {
+        for (case_id, documents) in jobs {
+            if let Err(e) = run_extraction(&app, &pool, &case_id, &documents, run_analysis).await {
+                crate::dlog!("[pipeline] case {} 批量抽取 fatal error: {}", case_id, e);
+            }
         }
     });
 }

@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 
 import { MarkdownModal } from "@/components/MarkdownModal";
-import { SettingsModal } from "@/components/SettingsModal";
+import { SettingsModal, type SettingsTab } from "@/components/SettingsModal";
 import { OnboardingWizard } from "@/components/OnboardingWizard";
 import { DeepSeekBalanceChip } from "@/components/DeepSeekBalanceChip";
 import { FeedbackButton } from "@/components/FeedbackButton";
@@ -39,6 +39,7 @@ import {
   planImportFolder,
   commitImportFolder,
   listCases,
+  findFeishuCasePath,
   openInDefaultApp,
   refreshCaseFiles,
   revealInFinder,
@@ -220,10 +221,25 @@ function App() {
     [activeModule, settingsDirty],
   );
 
+  // 2026-06-16 · 进入设置时初始落在哪个 tab(默认通用;导入缺 LLM key 深链到大脑)
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    SettingsTab | undefined
+  >(undefined);
+
   // 语义化别名 — 所有"打开设置"的入口走这条(过去是 setShowSettings(true) 弹 modal)
+  // 普通打开 → 落默认 tab(通用)
   const openSettings = useCallback(() => {
+    setSettingsInitialTab(undefined);
     setActiveModuleSafe("settings");
   }, [setActiveModuleSafe]);
+  // 深链到指定 tab(导入缺 key → 大脑)
+  const openSettingsTab = useCallback(
+    (tab: SettingsTab) => {
+      setSettingsInitialTab(tab);
+      setActiveModuleSafe("settings");
+    },
+    [setActiveModuleSafe],
+  );
 
   // onboarding / settings 修改完后,刷新 userDisplayName + DeepSeek chip 判断。
   // 2026-05-27 跟启动逻辑对齐:只要填了 key 就显示 chip(详见上面 useEffect 注释)。
@@ -362,17 +378,28 @@ function App() {
       }
     }
     {
-      // 2026-06-15:按云端后端校验对应的 key,与后端 effective_cloud_llm_backend 对齐
-      //(仅 cloud_llm_backend === "minimax" 走 MiniMax,其余回落 DeepSeek)。
-      // 此前硬查 DeepSeek 字段,导致 MiniMax 用户点导入被误报「DeepSeek API Key 还未填写」。
-      const isMinimax = s.cloud_llm_backend === "minimax";
+      // 2026-06-15/16:按云端后端校验对应的 key,与后端 effective_cloud_llm_backend 三选一对齐
+      // (minimax / 通用兼容 glm·mimo·custom / 其余回落 DeepSeek)。各后端 key 字段独立。
+      const backend = s.cloud_llm_backend ?? "deepseek";
+      const isMinimax = backend === "minimax";
+      const isCompat = ["glm", "mimo", "custom"].includes(backend);
       const filled = isMinimax
         ? !!s.minimax_api_key?.trim()
-        : !!s.cloud_llm_api_key?.trim();
+        : isCompat
+          ? !!s.compat_llm_api_key?.trim()
+          : !!s.cloud_llm_api_key?.trim();
       const verified = isMinimax
         ? !!s.minimax_verified_at
-        : !!s.deepseek_verified_at;
-      const label = `${isMinimax ? "MiniMax" : "DeepSeek"} API Key(云端 LLM)`;
+        : isCompat
+          ? !!s.compat_llm_verified_at
+          : !!s.deepseek_verified_at;
+      const providerName = isMinimax
+        ? "MiniMax"
+        : isCompat
+          ? { glm: "智谱 GLM", mimo: "小米 MiMo", custom: "自定义模型" }[backend] ??
+            "云端模型"
+          : "DeepSeek";
+      const label = `${providerName} API Key(云端 LLM)`;
       if (!filled) {
         issues.push({ label, reason: "missing" });
       } else if (!verified) {
@@ -391,11 +418,12 @@ function App() {
         "error",
         7000,
       );
-      openSettings();
+      // 缺的是云端 LLM key(a92ae91 校验),深链到「大脑」tab 直接补填
+      openSettingsTab("brain");
       return false;
     }
     return true;
-  }, [openSettings]);
+  }, [openSettingsTab]);
 
   // 单个文件夹 → 单个案件导入(保底路径,或拆分确认后的「合并成 1 个」)。失败给 toast。
   const importSingle = useCallback(async (path: string) => {
@@ -490,6 +518,32 @@ function App() {
     await doImport(selected);
   }, [validateImportKeys, doImport]);
 
+  // 点飞书日历事件后导入对应文件夹:先按事件标题反查飞书案件池里的本地路径,
+  // 反查不到再弹文件夹选择器。(整合外部贡献 PR #9,gcheng-001)
+  const handleCalendarImport = useCallback(
+    async (eventTitle: string) => {
+      if (!(await validateImportKeys())) return;
+      try {
+        const localPath = await findFeishuCasePath(eventTitle);
+        if (localPath) {
+          await doImport(localPath);
+          return;
+        }
+      } catch (e) {
+        console.warn("findFeishuCasePath failed:", e);
+      }
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: `选择「${eventTitle}」的案件文件夹`,
+      });
+      if (typeof selected === "string") {
+        await doImport(selected);
+      }
+    },
+    [validateImportKeys, doImport],
+  );
+
   // 首页拖拽文件夹进来:校验 key → 直接导入拖入的路径(走和按钮同一条管线)。
   const handleDropImport = useCallback(
     async (path: string) => {
@@ -565,6 +619,80 @@ function App() {
       setError(String(e));
     }
   }, [selectedCase]);
+
+  /**
+   * 首页右键卡片「删除」:按 id 删任意案件(不依赖当前选中)。同样先弹原生 confirm。
+   * 删的若正是当前选中案件,则把选中重置到列表第一个(或清空)。
+   */
+  const handleDeleteCaseById = useCallback(
+    async (id: string) => {
+      const target = cases.find((c) => c.id === id);
+      if (!target) return;
+      const confirmed = await confirmDialog(
+        `确定要从看板删除「${target.name}」吗?\n\n` +
+          `只删 CaseBoard 数据库里的记录,你的原始文件夹「${target.source_folder}」不会动,以后还可以重新导入。`,
+        { danger: true, okLabel: "删除案件" },
+      );
+      if (!confirmed) return;
+      try {
+        await deleteCase(id);
+        const all = await listCases();
+        setCases(all);
+        setSelectedId((prev) =>
+          prev === id ? (all.length > 0 ? all[0].id : null) : prev,
+        );
+        toast("已从看板删除(原始文件夹未动)", "success");
+      } catch (e) {
+        setError(String(e));
+        toast(`删除失败:${e}`, "error", 6000);
+      }
+    },
+    [cases],
+  );
+
+  /**
+   * 首页「多选」批量删除:一次确认 → 逐个删 → 刷新一次。只删库记录,不动原始文件夹。
+   */
+  const handleDeleteCases = useCallback(
+    async (ids: string[]) => {
+      if (ids.length === 0) return;
+      const names = ids
+        .map((id) => cases.find((c) => c.id === id)?.name)
+        .filter((n): n is string => !!n);
+      const preview =
+        names.slice(0, 5).join("、") +
+        (names.length > 5 ? ` 等 ${names.length} 个` : "");
+      const confirmed = await confirmDialog(
+        `确定要从看板删除选中的 ${ids.length} 个案件吗?\n\n${preview}\n\n` +
+          `只删 CaseBoard 数据库里的记录,你的原始文件夹不会动,以后还可以重新导入。`,
+        { danger: true, okLabel: `删除 ${ids.length} 个案件` },
+      );
+      if (!confirmed) return;
+      let deleted = 0;
+      try {
+        for (const id of ids) {
+          await deleteCase(id);
+          deleted += 1;
+        }
+        toast(`已删除 ${ids.length} 个案件(原始文件夹未动)`, "success");
+      } catch (e) {
+        setError(String(e));
+        toast(
+          `批量删除中断:成功 ${deleted}/${ids.length} 个,错误:${e}`,
+          "error",
+          7000,
+        );
+      } finally {
+        // 无论成功/中断都刷新一次,反映已删的部分
+        const all = await listCases();
+        setCases(all);
+        setSelectedId((prev) =>
+          prev && ids.includes(prev) ? (all.length > 0 ? all[0].id : null) : prev,
+        );
+      }
+    },
+    [cases],
+  );
 
   /**
    * 2026-05-24 i:打开案件分析报告。
@@ -764,6 +892,9 @@ function App() {
           userDisplayName={userDisplayName}
           onPickCase={pickCase}
           onImport={handleImport}
+          onDeleteCase={handleDeleteCaseById}
+          onDeleteCases={handleDeleteCases}
+          onImportFolder={handleCalendarImport}
         />
       </HomeDropZone>
     ) : (
@@ -834,6 +965,7 @@ function App() {
           <div className="h-full overflow-auto bg-background">
             <SettingsModal
               mode="page"
+              initialTab={settingsInitialTab}
               onDirtyChange={setSettingsDirty}
               onClose={refreshUserDisplayName}
               onSaved={refreshUserDisplayName}

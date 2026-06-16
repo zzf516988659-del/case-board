@@ -31,9 +31,12 @@ export function SplitImportDialog({
     plan.cases.map((c) => ({
       dir: c.dir,
       name: c.suggested_name,
-      include: true,
+      // 后端按目录名给默认勾选:命中「证件/宣传/模板…」等非案件资料词的默认不勾选(仍可手动勾上)
+      include: c.default_selected,
       docCount: c.doc_count,
       hasStage: c.has_stage_subdirs,
+      // 疑似非案件资料(默认未勾选的原因),用于行内提示标记
+      suspected: !c.default_selected,
     })),
   );
 
@@ -51,16 +54,32 @@ export function SplitImportDialog({
           <Layers className="mt-0.5 size-6 shrink-0 text-sky-500" />
           <div className="min-w-0">
             <h2 className="text-lg font-semibold text-stone-800">
-              检测到 {plan.cases.length} 个案件
+              检测到 {plan.cases.length} 个目录 · 已勾选 {selected.length} 个案件
             </h2>
             <p className="mt-0.5 text-sm text-stone-500">
-              这个文件夹像是多个案件混在一起。确认下面的拆分,或合并成一个案件。
+              这个文件夹像是多个案件混在一起。请核对下面的勾选 ——
+              <span className="text-stone-600">证件 / 宣传 / 模板</span>
+              等疑似资料目录已默认不选,需要的话手动勾上;或合并成一个案件。
             </p>
           </div>
         </div>
 
         {/* 体 */}
         <div className="flex-1 overflow-y-auto px-6 py-4">
+          {/* 防呆:案件过多(>3)→ 免费 OCR 批量易被限流卡死,建议逐个导入 */}
+          {selected.length > 3 && (
+            <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <span>
+                <strong>案件过多(已选 {selected.length} 个)。</strong>
+                一次批量导入超过 3 个案件,免费 OCR
+                批量识别很容易因限流卡死、大量文档识别失败。
+                <strong>建议一个一个案件导入</strong>
+                ,或在下方取消勾选、本次只留 1~3 个。
+              </span>
+            </div>
+          )}
+
           {plan.root_already_imported && (
             <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
               <AlertTriangle className="mt-0.5 size-4 shrink-0" />
@@ -101,6 +120,14 @@ export function SplitImportDialog({
                 {r.hasStage && (
                   <span className="shrink-0 rounded bg-sky-100 px-1.5 py-0.5 text-[11px] font-medium text-sky-600">
                     已分阶段
+                  </span>
+                )}
+                {r.suspected && (
+                  <span
+                    className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-600"
+                    title="目录名像是证件/宣传/模板等非案件资料,已默认不选;确认是案件可手动勾上"
+                  >
+                    疑似资料
                   </span>
                 )}
               </label>
@@ -159,10 +186,19 @@ export function SplitImportDialog({
                   plan.shared_dirs,
                 )
               }
-              disabled={busy || selected.length === 0}
+              disabled={busy || selected.length === 0 || selected.length > 3}
+              title={
+                selected.length > 3
+                  ? "一次最多导入 3 个案件,请取消勾选到 3 个以内(或点「合并成 1 个案件」)"
+                  : undefined
+              }
               className="rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:opacity-50"
             >
-              {busy ? "导入中…" : `拆成 ${selected.length} 个案件导入`}
+              {busy
+                ? "导入中…"
+                : selected.length > 3
+                  ? `最多 3 个(已选 ${selected.length})`
+                  : `拆成 ${selected.length} 个案件导入`}
             </button>
           </div>
         </div>

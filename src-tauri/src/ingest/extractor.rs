@@ -1,9 +1,9 @@
 //! 单个文档的字段抽取。
 //!
 //! 流程:
-//!   1. 根据文件扩展名分派文本抽取方式(textutil / 直接读 / pdftotext)
+//!   1. 根据文件扩展名分派文本抽取方式(docx 原生 / 直接读 / pdf-inspector / office→MinerU)
 //!   2. PDF 文本 < 200 字时自动 fallback 到 OCR 后端(按 OcrContext.cloud_enabled 分流)
-//!   3. 图片直接走 OCR 后端
+//!   3. 图片 + office 文档(doc/rtf/odt/ppt/xls)直接走 OCR / MinerU 云端解析
 //!   4. 把抽出的纯文本喂给本机 LLM 抽 7 个字段
 //!   5. 返回 ExtractedFields(或 Skip / Error)
 //!
@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::db::metrics::MetricEntry;
+use crate::docx_extract;
 use crate::ingest::ocr::{self, OcrContext};
 use crate::llm::{self, ExtractedFields};
 
@@ -149,10 +150,10 @@ pub enum ExtractResult {
 /// 只抽文本、不跑 LLM 字段 —— 给「低价值/证据类」被 skip 的文档用,让它们仍可被
 /// `read_case_doc` / `find_in_document` / 全文搜索读到。
 ///
-/// **成本红线**:复用已有 `extract_text`(txt/md 直读、docx/doc 走 textutil、PDF 走
-/// pdf-inspector→pdftotext),**绝不触发云端 OCR**。扫描件 PDF / 图片(`extract_text`
-/// 返回 `__NEEDS_OCR__`)或文本太少时返回 `Ok(None)`,调用方保持「跳过(无文本)」——
-/// 不为省下来的字段抽取偷偷烧 MinerU 积分。
+/// **成本红线**:复用已有 `extract_text`(txt/md 直读、docx 原生解析、PDF 走
+/// pdf-inspector),**绝不触发云端 OCR**。扫描件 PDF / 图片 / office 文档(doc/ppt/xls,
+/// `extract_text` 返回 `__NEEDS_OCR__`)或文本太少时返回 `Ok(None)`,调用方保持「跳过(无文本)」——
+/// 不为省下来的字段抽取偷偷烧 MinerU 积分(归档类 office 文档因此只在「完整抽」档才走 MinerU)。
 ///
 /// 返回:
 ///   - `Ok(Some(text))` —— 便宜直抽成功,文本可用
@@ -185,12 +186,15 @@ fn text_extraction_kind(filename: &str) -> TextKind {
         || f.ends_with(".htm")
     {
         TextKind::ReadDirect
-    } else if f.ends_with(".docx")
-        || f.ends_with(".doc")
-        || f.ends_with(".rtf")
-        || f.ends_with(".odt")
-    {
-        TextKind::Textutil
+    } else if f.ends_with(".docx") {
+        // 2026-06-15 V0.3.18 fix:.docx 走原生 OOXML 解析(跨平台,替代 macOS textutil)
+        TextKind::Docx
+    } else if is_office_textutil_ext(&f) {
+        // 2026-06-16:.doc / .rtf / .odt → macOS textutil 优先(免费即时),失败/非 mac → MinerU 兜底
+        TextKind::OfficeTextutil
+    } else if is_office_mineru_only_ext(&f) {
+        // 2026-06-16:.ppt(x) / .xls(x) → textutil 不支持,统一走 MinerU 云端解析(Paddle 也不支持)
+        TextKind::OfficeCloud
     } else if f.ends_with(".pdf") {
         TextKind::Pdf
     } else if is_ocr_image_ext(&f) {
@@ -213,12 +217,42 @@ pub(crate) fn is_ocr_image_ext(lower_filename: &str) -> bool {
     .any(|ext| lower_filename.ends_with(ext))
 }
 
+/// `.doc` / `.rtf` / `.odt`(传入**已小写**文件名)—— macOS 系统 textutil 能免费即时抽,
+/// 失败或非 macOS 平台则交 MinerU 云端兜底。
+fn is_office_textutil_ext(lower_filename: &str) -> bool {
+    [".doc", ".rtf", ".odt"]
+        .iter()
+        .any(|ext| lower_filename.ends_with(ext))
+}
+
+/// `.ppt(x)` / `.xls(x)`(传入**已小写**文件名)—— textutil 不支持,所有平台只能走 MinerU 云端解析。
+fn is_office_mineru_only_ext(lower_filename: &str) -> bool {
+    [".ppt", ".pptx", ".xls", ".xlsx"]
+        .iter()
+        .any(|ext| lower_filename.ends_with(ext))
+}
+
+/// 所有"本地无跨平台纯 Rust 方案、最终可能落到 MinerU"的 office 格式(并集,传入**已小写**文件名)。
+/// **不含 `.docx`**(本地原生 `docx_extract` 优先,免费快)。与 `ocr::extract_with_ocr`(office 强制
+/// MinerU)、`pipeline::might_hit_mineru`(节流闸门)、`extract_one`(失败 metric 标签)共用,防四处漂移。
+/// 2026-06-16(作者拍板):doc/rtf/odt 在 macOS 走 textutil 免费快路径;ppt/xls + 非 mac 的 doc 组走 MinerU。
+pub(crate) fn is_office_cloud_ext(lower_filename: &str) -> bool {
+    is_office_textutil_ext(lower_filename) || is_office_mineru_only_ext(lower_filename)
+}
+
 enum TextKind {
     /// 纯文本,直接 fs::read_to_string
     ReadDirect,
-    /// 走 macOS textutil 命令
-    Textutil,
-    /// PDF,走 pdftotext;字数太少 fallback OCR
+    /// 2026-06-15 V0.3.18 fix:.docx 走 docx_extract 原生 OOXML 解析(跨平台,替代 macOS textutil)。
+    /// 2026-06-16:本地解析失败时兜底 MinerU 云端(MinerU 也支持 docx)。
+    Docx,
+    /// 2026-06-16:.doc / .rtf / .odt —— macOS 用系统 textutil 免费即时抽;失败或非 macOS 平台
+    /// 落 MinerU 云端兜底(整份上传,Windows 也能用)。
+    OfficeTextutil,
+    /// 2026-06-16:.ppt(x) / .xls(x) —— textutil 不支持,所有平台统一走 MinerU 云端文档解析。
+    /// Paddle 不支持 → ocr.rs 对 office 强制 MinerU。
+    OfficeCloud,
+    /// PDF,走 pdf-inspector;扫描件 / 抽取失败 fallback OCR
     Pdf,
     /// 图片,直接走 OCR 后端
     Image,
@@ -234,23 +268,37 @@ fn extract_text(path: &Path, kind: TextKind) -> Result<(String, &'static str), S
         TextKind::ReadDirect => std::fs::read_to_string(path)
             .map(|t| (t, "read_direct"))
             .map_err(|e| format!("读文件失败: {}", e)),
-        TextKind::Textutil => {
-            let output = std::process::Command::new("textutil")
-                .arg("-convert")
-                .arg("txt")
-                .arg("-stdout")
-                .arg(path)
-                .output()
-                .map_err(|e| format!("调 textutil 失败: {}", e))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "textutil 转换失败: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
+        TextKind::Docx => {
+            // 2026-06-15 V0.3.18 fix:跨平台 .docx 抽取(zip + XML),替代 macOS textutil。
+            // Windows / Linux 上 textutil 不存在,会 "program not found"。
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| format!("路径含非 UTF-8 字符: {:?}", path))?;
+            match docx_extract::extract_docx_text(path_str) {
+                Ok((text, true)) => Ok((text, "docx-native")),
+                // 2026-06-16:本地原生解析失败(文件损坏 / 异常 OOXML)→ 兜底 MinerU 云端(也支持 docx)
+                Ok((_, false)) | Err(_) => Err("__NEEDS_OCR__".into()),
             }
-            String::from_utf8(output.stdout)
-                .map(|t| (t, "textutil"))
-                .map_err(|e| format!("textutil 输出不是 UTF-8: {}", e))
+        }
+        TextKind::OfficeTextutil => {
+            // 2026-06-16(作者拍板):.doc / .rtf / .odt —— macOS 用系统 textutil 免费即时抽
+            //(作者主用 mac,省积分 + 不联网);textutil 失败(罕见)或非 macOS 平台 → 落 MinerU 云端兜底。
+            #[cfg(target_os = "macos")]
+            {
+                match textutil_extract(path) {
+                    Ok(t) if !t.trim().is_empty() => Ok((t, "textutil")),
+                    _ => Err("__NEEDS_OCR__".into()),
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err("__NEEDS_OCR__".into())
+            }
+        }
+        TextKind::OfficeCloud => {
+            // 2026-06-16:.ppt(x) / .xls(x) 无跨平台纯 Rust 方案,交给 OCR 链路 → MinerU 云端文档解析
+            //(extract_one 接力;ocr.rs 对 office 强制走 MinerU,只配 Paddle 没配 MinerU 时给明确引导报错)。
+            Err("__NEEDS_OCR__".into())
         }
         TextKind::Pdf => {
             // 2026-05-26 V0.1.11 PDF 抽取链路:
@@ -278,6 +326,26 @@ fn extract_text(path: &Path, kind: TextKind) -> Result<(String, &'static str), S
         TextKind::Image => Err("__NEEDS_OCR__".into()), // 由 extract_one 接力 OCR 后端
         TextKind::Unsupported => Err("不支持的格式".into()),
     }
+}
+
+/// macOS 系统 textutil 抽 .doc/.rtf/.odt 纯文本(免费、即时、离线)。
+/// 仅 macOS 编译;非 macOS 平台这些格式直接走 MinerU(见 `extract_text` 的 OfficeTextutil 分支)。
+#[cfg(target_os = "macos")]
+fn textutil_extract(path: &Path) -> Result<String, String> {
+    let output = std::process::Command::new("textutil")
+        .arg("-convert")
+        .arg("txt")
+        .arg("-stdout")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("调 textutil 失败: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "textutil 转换失败: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|e| format!("textutil 输出不是 UTF-8: {}", e))
 }
 
 /// 用 pdftotext (poppler) 抽 PDF 纯文本。
@@ -370,7 +438,10 @@ pub async fn extract_one(
             let ocr_backend = if ocr_ctx.force_backend.as_deref() == Some("ppocrv6") {
                 "ppocrv6"
             } else if ocr_ctx.cloud_enabled {
-                if ocr_ctx.cloud_primary == "paddle-vl" {
+                // 2026-06-16:office 文档强制走 MinerU(Paddle 不支持,见 ocr.rs),失败标签也写 MinerU
+                if is_office_cloud_ext(&filename.to_lowercase()) {
+                    "mineru-precision"
+                } else if ocr_ctx.cloud_primary == "paddle-vl" {
                     "paddle-vl"
                 } else {
                     "mineru-precision"

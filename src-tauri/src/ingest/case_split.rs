@@ -7,15 +7,17 @@
 //! - **多案·已整理**:顶层 `02_案件A/ 03_案件B/ 01_原告与共用证据/` → N 案件 + 共用材料。
 //! - **年份大文件夹**:`2026/{张三案/, 李四案/, …}` 递归展开成很多案件。
 //!
-//! ## 核心判别(advisor 修正:先剔除再计数,否则案件内的阶段子目录会被误拆成多案)
+//! ## 核心判别(2026-06-16 修「过拆」· 反馈 ea761d3d)
 //! `collect_cases(D)`:
-//! 1. children = D 的子目录 **减去** {阶段词 / 共用词 / 杂项词} 命中的;
-//! 2. case_candidates = children 里**(递归)含文档**的;
-//! 3. `len(case_candidates) >= 2` → D 是容器(递归展开每个候选);否则 D 自己是一个案件。
+//! 1. children = D 的子目录 **减去** {阶段词 / 共用词 / 杂项词} 命中的、且(递归)含文档的;
+//! 2. case_like = children 里**本身含阶段子目录**(`has_stage_subdirs`,组织过的案件强信号)的个数;
+//! 3. `case_like >= 2` → D 是容器(递归展开每个候选);否则 D 自己是一个案件。
 //!
-//! 关键:`02_案件A/` 的子目录全是阶段目录(诉讼文书/法院文书/最终结果/盖章扫描)→ 被剔除 →
-//! 0 个候选 → `02_案件A` 收敛成**一个**案件;而 `张三/` 下 `02_案件A`+`03_案件B` 作为候选存活
-//! → 2 个 → `张三` 判为容器 → 拆成两案。
+//! 关键:`案件A/` 下的 `起诉文书 / 法院文件 / 合同与证据 / 律师与主体材料` 等**材料分类目录**
+//! 不在阶段词表里、且直接放文件(无阶段子目录)→ case_like=0 → `案件A` 收敛成**一个**案件
+//! (旧逻辑只数候选个数 ≥2 就拆,把案件A 误拆成 5 案);
+//! 而 `张三/{02_案件A(含01_诉讼文书), 03_案件B(含01_诉讼文书)}` 两候选都含阶段子目录
+//! → case_like=2 → `张三` 判为容器 → 拆成两案。
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +39,30 @@ const STAGE_HINTS: &[&str] = &[
 const SHARED_HINTS: &[&str] = &["共用", "共享", "共同", "通用"];
 /// 杂项/忽略目录词表(contains)。
 const MISC_HINTS: &[&str] = &["后续", "待整理", "归档备份", "其他", "其它"];
+/// 非案件资料词表(contains,剥前缀后匹配)。命中 → 候选**默认不勾选**(`default_selected=false`),
+/// 但仍作为候选展示给用户(可手动勾上),**不直接丢弃** —— 关键词是「猜默认」,不是「定生死」:
+/// 像「宣传侵权案」这类真案件万一撞词,用户在拆分弹窗里勾回即可,不会无可挽回。
+///
+/// 2026-06-16 加(反馈 ea761d3d 第①问):年度目录下的 `证件 / 宣传资料 / 模板资料 / 企业宣传册`
+/// 等非案件目录此前被无差别当成候选案件、默认全勾选导入。
+/// 只收**顶层常见**的资料目录名;`办公区域 / 会议室 / 接待洽谈` 这类是 `企业宣传册` 的**深层子目录**,
+/// 因 `case_like=0` 已被收敛进「企业宣传册」单候选、不会单独冒泡进候选列表,故无需列。
+/// 故意避开会和真案件类型撞的裸词(如「行政」会撞行政诉讼、「管理」太泛),只用够具体的词。
+const EXCLUDE_HINTS: &[&str] = &[
+    "非案件",
+    "证件",
+    "证照",
+    "宣传",
+    "模板",
+    "范本",
+    "素材",
+    "照片",
+    "相册",
+    "行政资料",
+    "律所方案",
+    "律所管理",
+    "规章制度",
+];
 /// 不进检测的目录(隐藏 / 系统 / 依赖)。
 const IGNORED_DIRS: &[&str] = &[".git", "node_modules", "__MACOSX", ".idea", ".vscode"];
 /// 文档型扩展名(用于"目录是否含材料"的计数)。
@@ -59,6 +85,9 @@ pub struct CaseCandidate {
     pub doc_count: usize,
     /// 是否含阶段子目录(强信号:这是一个组织过的案件)
     pub has_stage_subdirs: bool,
+    /// 拆分弹窗里**默认是否勾选**。命中非案件资料词表(`EXCLUDE_HINTS`)→ `false`(默认不选,
+    /// 但仍展示可手动勾上)。纯展示/默认值,**不参与** `multi`/`strong` 判定 —— 否则会把弹窗整个吞掉。
+    pub default_selected: bool,
 }
 
 /// 一个被忽略的目录及原因。
@@ -111,6 +140,11 @@ fn is_shared_dir(name: &str) -> bool {
 fn is_misc_dir(name: &str) -> bool {
     let n = strip_num_prefix(name);
     MISC_HINTS.iter().any(|h| n.contains(h))
+}
+/// 非案件资料:剥前缀后**包含**排除词 → 候选默认不勾选(仍展示,用户可手动勾上)。
+fn is_exclude_dir(name: &str) -> bool {
+    let n = strip_num_prefix(name);
+    EXCLUDE_HINTS.iter().any(|h| n.contains(h))
 }
 
 // ───────────────────────── 目录遍历工具 ─────────────────────────
@@ -189,6 +223,7 @@ fn make_candidate(dir: &Path) -> CaseCandidate {
         suggested_name: strip_num_prefix(&raw).to_string(),
         doc_count: doc_count_recursive(dir, 0),
         has_stage_subdirs: has_stage_subdirs(dir),
+        default_selected: !is_exclude_dir(&raw),
     }
 }
 
@@ -209,7 +244,21 @@ fn collect_cases(dir: &Path, depth: usize) -> Vec<CaseCandidate> {
         .filter(|s| doc_count_recursive(s, 0) > 0)
         .collect();
 
-    if candidate_children.len() >= 2 {
+    // 2026-06-16 修「过拆」(反馈 ea761d3d):只有当 ≥2 个候选子目录**本身像组织好的案件**
+    // (含阶段子目录,has_stage_subdirs)时,才把 dir 当容器递归展开;否则 dir 自己就是一个案件,
+    // 它的子目录是「材料分类/阶段」,不是子案件。
+    //
+    // 旧逻辑用 `candidate_children.len() >= 2`:案件A 下的 `起诉文书 / 法院文件 / 合同与证据 /
+    // 保全与查控 / 律师与主体材料` 这些材料目录都不在阶段词表里 → 被当成候选 → 案件A 被误拆成 5 案。
+    // 这些材料目录里直接放文件、没有阶段子目录 → case_like=0 → 现在正确收敛成 1 案。
+    // 而「张三民间借贷/{02_案件A(含01_诉讼文书), 03_案件B(含01_诉讼文书)}」这种真嵌套容器,
+    // 两个候选都含阶段子目录 → case_like=2 → 仍正确递归拆开(保 nested_container_recurses 测试)。
+    let case_like = candidate_children
+        .iter()
+        .filter(|c| has_stage_subdirs(c))
+        .count();
+
+    if case_like >= 2 {
         // 容器:递归展开每个候选
         candidate_children
             .iter()
@@ -306,6 +355,8 @@ fn single_case_plan(root: &Path, root_str: &str) -> ImportPlan {
             suggested_name: name,
             doc_count: doc_count_recursive(root, 0),
             has_stage_subdirs: has_stage_subdirs(root),
+            // 保底单案(multi=false,不弹拆分弹窗)→ 默认勾选无意义,置 true 以示「就这一个」。
+            default_selected: true,
         }],
         shared_dirs: Vec::new(),
         ignored: Vec::new(),

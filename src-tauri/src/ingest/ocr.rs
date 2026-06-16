@@ -234,7 +234,29 @@ pub async fn extract_with_ocr(path: &Path, ctx: &OcrContext) -> OcrResult {
         // 这里再按 token 实际有无过滤一遍,防 Settings 旁路改出空 key。
         let mineru_entry = mineru_token.map(|t| ("mineru-precision", t));
         let paddle_entry = paddle_token.map(|t| ("paddle-vl", t));
-        let order: Vec<(&'static str, &str)> = if ctx.cloud_primary == "paddle-vl" {
+
+        // 2026-06-16:office 文档(doc/rtf/odt/ppt/xls 等)**只有 MinerU 能解析,Paddle 不支持**。
+        // 这类文件强制只走 MinerU(跳过 Paddle,别浪费一次必失败的调用);只配了 Paddle 没配
+        // MinerU 时给明确引导报错,不静默跳过(守已知坑#8 透传真错)。
+        let is_office = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| crate::ingest::extractor::is_office_cloud_ext(&n.to_lowercase()))
+            .unwrap_or(false);
+        let order: Vec<(&'static str, &str)> = if is_office {
+            match mineru_entry {
+                Some(e) => vec![e],
+                None => {
+                    return OcrResult::Failed {
+                        error: "该 Office 文档(.doc/.rtf/.odt/.ppt/.xls 等)需 MinerU 云端解析,\
+                                当前只配了 PaddleOCR(不支持 Office 文档)。\
+                                请在「设置 → 功能模型」申请并填入 MinerU OCR API key 后重试。"
+                            .into(),
+                        attempted: vec![],
+                    };
+                }
+            }
+        } else if ctx.cloud_primary == "paddle-vl" {
             [paddle_entry, mineru_entry].into_iter().flatten().collect()
         } else {
             [mineru_entry, paddle_entry].into_iter().flatten().collect()

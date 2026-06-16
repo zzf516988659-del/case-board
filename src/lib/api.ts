@@ -13,7 +13,10 @@ import type {
   Case,
   CaseInstance,
   CaseWithDocs,
+  CourtFilingJob,
   ExtractedFields,
+  FeishuCalendarEvent,
+  LawyerProfile,
   NewCaseInstance,
   ImportPlan,
   ImportResult,
@@ -84,8 +87,9 @@ export function readTextFile(path: string): Promise<string> {
 }
 
 /**
- * 抽 .docx / .doc / .rtf / .odt 的纯文本(macOS textutil)。
- * 用于在 App 内预览 Word 文档,不用启动 Word。
+ * 抽 .docx / .doc / .rtf / .odt 的纯文本,用于在 App 内即时预览 Word 文档(不启动 Word)。
+ * .docx 走跨平台原生解析;.doc/.rtf/.odt 在 macOS 用 textutil 即时预览,其他平台暂不支持预览
+ *(导入案件时这类文档由 MinerU 云端解析入库,内容照常进 AI 上下文)。
  */
 export function extractDocText(path: string): Promise<string> {
   return invoke<string>("extract_doc_text", { path });
@@ -155,13 +159,26 @@ export function verifyMiniMaxKey(
   });
 }
 
+/** 2026-06-16:在线验证通用 OpenAI 兼容后端(GLM/MiMo/自定义)—— 一发最小 chat 请求验 key+地址+模型。 */
+export function verifyOpenAICompatKey(
+  apiKey: string,
+  endpoint: string,
+  model: string,
+): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_openai_compat_key", {
+    apiKey,
+    endpoint,
+    model,
+  });
+}
+
 /** 2026-05-25 V0.1.8:在线验证元典(open.chineselaw.com)API key。
  *  消耗 1 次企业搜索配额(用 name=test top_k=1 探测,代价最小)。*/
 export function verifyYuandianKey(apiKey: string): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_yuandian_key", { apiKey });
 }
 
-/** 2026-05-25 V0.1.8:检测远程最新版本(发布站点的 version.json)。
+/** 2026-05-25 V0.1.8:检测远程最新版本(lawtools.top 的 version.json)。
  *  失败时 has_update=false + error 字段填上原因,前端可静默忽略。*/
 export function checkForUpdate(): Promise<UpdateInfo> {
   return invoke<UpdateInfo>("check_for_update");
@@ -589,6 +606,85 @@ export function listCalendarEvents(): Promise<CalendarEvent[]> {
 
 export function deleteCalendarEvent(id: string): Promise<number> {
   return invoke<number>("delete_calendar_event", { id });
+}
+
+/* ------------------------------------------------------------------ */
+/* 飞书日历(2026-06-17 · 整合外部贡献 PR #9 · 复用本机 lark-cli 登录态)   */
+/* ------------------------------------------------------------------ */
+
+/** 拉取飞书日历事件(未启用返回空数组)。start/end 为 "YYYY-MM-DD"。 */
+export function fetchFeishuCalendar(
+  start: string,
+  end: string,
+): Promise<FeishuCalendarEvent[]> {
+  return invoke<FeishuCalendarEvent[]>("fetch_feishu_calendar", { start, end });
+}
+
+/** 按飞书日历事件标题反查本地案件目录(需配案件池表);未配/未命中返回 null。 */
+export function findFeishuCasePath(eventSummary: string): Promise<string | null> {
+  return invoke<string | null>("find_feishu_case_path", { eventSummary });
+}
+
+/* ------------------------------------------------------------------ */
+/* 法院一张网在线立案(2026-06-17 · 整合外部贡献 PR #8)                   */
+/* ------------------------------------------------------------------ */
+
+export function startCourtFiling(
+  caseId: string,
+  filingType: "civil" | "execution",
+  agentIds: string[],
+  originalCaseNumber?: string,
+  materialFolder?: string,
+): Promise<CourtFilingJob> {
+  return invoke<CourtFilingJob>("start_court_filing", {
+    caseId,
+    filingType,
+    agentIds,
+    originalCaseNumber,
+    materialFolder,
+  });
+}
+
+export function listCourtFilingJobs(caseId: string): Promise<CourtFilingJob[]> {
+  return invoke<CourtFilingJob[]>("list_court_filing_jobs", { caseId });
+}
+
+export function getCourtFilingJob(id: string): Promise<CourtFilingJob | null> {
+  return invoke<CourtFilingJob | null>("get_court_filing_job", { id });
+}
+
+export function submitCaptchaAnswer(
+  jobId: string,
+  taskId: string,
+  round: number,
+  answer: string,
+): Promise<void> {
+  return invoke<void>("submit_captcha_answer", { jobId, taskId, round, answer });
+}
+
+export function listLawyerProfiles(): Promise<LawyerProfile[]> {
+  return invoke<LawyerProfile[]>("list_lawyer_profiles");
+}
+
+export function saveLawyerProfile(
+  profile: Omit<LawyerProfile, "id" | "created_at" | "updated_at">,
+): Promise<LawyerProfile> {
+  return invoke<LawyerProfile>("save_lawyer_profile", { profile });
+}
+
+export function updateLawyerProfile(
+  id: string,
+  profile: Omit<LawyerProfile, "id" | "created_at" | "updated_at">,
+): Promise<LawyerProfile> {
+  return invoke<LawyerProfile>("update_lawyer_profile", { id, profile });
+}
+
+export function deleteLawyerProfile(id: string): Promise<void> {
+  return invoke<void>("delete_lawyer_profile", { id });
+}
+
+export function setDefaultLawyer(id: string): Promise<void> {
+  return invoke<void>("set_default_lawyer", { id });
 }
 
 /* ------------------------------------------------------------------ */

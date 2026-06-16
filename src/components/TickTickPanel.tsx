@@ -16,6 +16,7 @@ import {
   ArrowLeftRight,
 } from "lucide-react";
 import { openUrl } from "@/lib/api";
+import { useFeatureFlag } from "@/lib/featureFlags";
 import {
   ttStatus,
   ttConnectToken,
@@ -77,6 +78,8 @@ export function TickTickPanel() {
         </p>
       </div>
 
+      <HomeMirrorToggle />
+
       {err && (
         <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
           {err}
@@ -95,6 +98,39 @@ export function TickTickPanel() {
         <ConnectedView status={status} onStatus={setStatus} onError={setErr} />
       )}
     </div>
+  );
+}
+
+// 「在首页显示待办汇总」开关。原在设置页「功能开关」tab,2026-06-16 按作者要求挪到
+// 滴答工具内 —— 跟工具就近,谁用滴答谁在这里决定首页要不要那块汇总。
+// 复用同一个 feature flag(home_ticktick),首页 HomeView 读它条件渲染,语义不变。
+function HomeMirrorToggle() {
+  const [on, setOn] = useFeatureFlag("home_ticktick");
+  return (
+    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-border bg-background/50 px-3 py-2.5">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-foreground">在首页显示待办汇总</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          打开后首页会多出一块「滴答待办」汇总;关闭则首页保持清爽,这里照常同步。
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label="在首页显示滴答待办汇总"
+        onClick={() => setOn(!on)}
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+          on ? "bg-sky-600" : "bg-muted"
+        }`}
+      >
+        <span
+          className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${
+            on ? "translate-x-4" : "translate-x-0.5"
+          }`}
+        />
+      </button>
+    </label>
   );
 }
 

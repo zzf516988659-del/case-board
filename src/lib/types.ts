@@ -260,6 +260,8 @@ export interface CaseCandidate {
   suggested_name: string;
   doc_count: number;
   has_stage_subdirs: boolean;
+  /** 拆分弹窗里默认是否勾选。命中非案件资料词表(证件/宣传/模板…)→ false(默认不选,仍可手动勾上) */
+  default_selected: boolean;
 }
 
 /** 被忽略的目录。对应 Rust `case_split::IgnoredDir`。 */
@@ -373,13 +375,19 @@ export interface Settings {
   cloud_llm_endpoint: string | null;
   cloud_llm_model: string | null;
   cloud_llm_api_key: string | null;
-  /** 2026-06-15:云端 LLM 后端 "deepseek"(默认/null)/ "minimax"。选 minimax 改读下面 minimax_* 字段。 */
+  /** 云端 LLM 后端:"deepseek"(默认/null)/ "minimax" / "glm" / "mimo" / "custom"。
+   *  minimax 读 minimax_*;glm/mimo/custom 读 compat_llm_*;其余读 cloud_llm_*。 */
   cloud_llm_backend: string | null;
   minimax_api_key: string | null;
   minimax_endpoint: string | null;
   /** MiniMax 模型名(可编辑文本,默认 MiniMax-M2)。型号以 MiniMax 控制台为准。 */
   minimax_model: string | null;
   minimax_verified_at: string | null;
+  /** 2026-06-16:通用 OpenAI 兼容后端(glm/mimo/custom 共用)。完整 chat completions URL / 具体模型名 / key。 */
+  compat_llm_endpoint: string | null;
+  compat_llm_model: string | null;
+  compat_llm_api_key: string | null;
+  compat_llm_verified_at: string | null;
   /** 2026-05-24 k:元典法律开放平台 API key(执行案件查被执行人 / 财产线索)*/
   yuandian_api_key: string | null;
   /** 2026-06-01 V0.3:快递100 实时查询 customer + key(快递查询工具用)*/
@@ -409,6 +417,28 @@ export interface Settings {
   /** 2026-06-14:首页"日程日历"功能开关(默认 false / 关闭) */
   home_calendar_enabled: boolean;
 
+  // ===== 2026-06-17 飞书日历(整合外部贡献 PR #9) =====
+  /** 飞书日历总开关。null/false = 关。开+配好后首页显示飞书月历(替代本地日程日历卡)。 */
+  feishu_enabled: boolean | null;
+  /** lark-cli 可执行文件路径。null/空 = 按平台自动找(mac 走 Homebrew,Win/Linux 靠 PATH)。 */
+  feishu_lark_cli_path: string | null;
+  /** (可选)飞书"案件池"多维表格 App Token;配了才能点日历事件反查并导入本地案件目录。 */
+  feishu_app_token: string | null;
+  /** (可选)飞书"案件池"多维表格 Table ID。 */
+  feishu_cases_table_id: string | null;
+
+  // ===== 2026-06-17 辅助在线立案(整合外部贡献 PR #8) =====
+  /** 立案 CLI 包根目录。null = 用应用内置 standalone/court_filing_cli。 */
+  court_filing_cli_path: string | null;
+  /** Python 解释器路径。null = 用 "python3"(Windows 需填 "python" 或 venv 全路径)。 */
+  court_filing_python: string | null;
+  /** 全国法院一张网账号(手机号)。只存本机。 */
+  court_filing_account: string | null;
+  /** 全国法院一张网密码。只存本机。 */
+  court_filing_password: string | null;
+  /** 一张网登录态 cookie 缓存目录。null = 默认应用数据目录。 */
+  court_filing_cookie_dir: string | null;
+
   // ===== V0.2 D2 新增 · 本地知识库 + chat V2 budget (对应 settings.rs 同名字段) =====
   /** 本地法律知识库根目录(支持 ~/);null = 不启用。 */
   local_kb_root: string | null;
@@ -431,6 +461,73 @@ export interface Settings {
   mcp_servers: McpServerConfig[];
   /** 团队版:本机团队身份;null/缺省 = 未加入团队。后端 team_* 命令直接写,设置表单不碰它。 */
   team?: TeamIdentity | null;
+}
+
+/** 飞书日历事件(对应 Rust feishu::FeishuCalendarEvent)。 */
+export interface FeishuCalendarEvent {
+  event_id: string;
+  summary: string;
+  start_date: string;
+  end_date: string | null;
+  is_all_day: boolean;
+  description: string | null;
+  location: string | null;
+  app_link: string | null;
+}
+
+// ===== 法院一张网在线立案(整合外部贡献 PR #8) =====
+
+export interface CourtFilingJob {
+  id: string;
+  case_id: string;
+  filing_type: "civil" | "execution";
+  court_name: string;
+  cookie_account: string | null;
+  status: "pending" | "running" | "waiting_captcha" | "completed" | "failed" | "cancelled";
+  output_dir: string | null;
+  preview_url: string | null;
+  progress_json: string | null;
+  captcha_active: number;
+  error: string | null;
+  timing_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CourtFilingProgress {
+  job_id: string;
+  case_id: string;
+  phase: "system" | "login" | "http" | "playwright" | "captcha";
+  stage: string;
+  level: "info" | "warning" | "error";
+  message: string;
+  detail?: string;
+  round?: number;
+  task_id?: string;
+  image_base64?: string;
+  timing?: Record<string, number>;
+}
+
+export interface CourtFilingCaptcha {
+  job_id: string;
+  case_id: string;
+  task_id: string;
+  round: number;
+  image_base64: string;
+  timeout_sec: number;
+}
+
+export interface LawyerProfile {
+  id: string;
+  name: string;
+  bar_number: string | null;
+  law_firm: string | null;
+  id_number: string | null;
+  phone: string | null;
+  address: string | null;
+  is_default: number;
+  created_at: string;
+  updated_at: string;
 }
 
 /** 外部 MCP server 配置项(对应 Rust chat::mcp_bridge::McpServerConfig)。

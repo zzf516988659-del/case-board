@@ -17,6 +17,11 @@ import {
   Trash2,
   Plus,
   Plug,
+  Brain,
+  Wrench,
+  BookText,
+  SlidersHorizontal,
+  User,
 } from "lucide-react";
 import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
 import { confirmDialog } from "@/lib/dialog";
@@ -40,6 +45,7 @@ import {
   testMcpServer,
   verifyDeepSeekKey,
   verifyMiniMaxKey,
+  verifyOpenAICompatKey,
   verifyMinerUKey,
   verifyPaddleVlKey,
   verifyEmbeddingKey,
@@ -51,8 +57,56 @@ import {
 } from "@/lib/api";
 import type { Settings, McpServerConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { FEATURE_FLAGS, useFeatureFlag } from "@/lib/featureFlags";
+import { FONT_SCALE, useFontScale } from "@/lib/uiScale";
 
 type VerifyStatus = "idle" | "verifying" | "ok" | "fail";
+
+/** 云端 AI 后端可选项(下拉)。glm/mimo/custom 共用「通用 OpenAI 兼容」配置(compat_llm_*)。 */
+const CLOUD_BACKEND_OPTIONS = [
+  { id: "deepseek", label: "DeepSeek(默认)" },
+  { id: "minimax", label: "MiniMax(M 系列)" },
+  { id: "glm", label: "智谱 GLM(OpenAI 兼容)" },
+  { id: "mimo", label: "小米 MiMo(OpenAI 兼容)" },
+  { id: "custom", label: "自定义(OpenAI 兼容)" },
+] as const;
+
+/** OpenAI 兼容后端预设(镜像 Rust llm::providers;切换时预填到 compat_llm_*,均可改)。 */
+const COMPAT_PRESETS: Record<
+  string,
+  { label: string; endpoint: string; model: string; applyUrl?: string }
+> = {
+  glm: {
+    label: "智谱 GLM",
+    endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    model: "glm-4.6",
+    applyUrl: "https://open.bigmodel.cn/usercenter/apikeys",
+  },
+  mimo: {
+    label: "小米 MiMo",
+    endpoint: "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+    model: "mimo-v2.5",
+  },
+  custom: { label: "自定义(OpenAI 兼容)", endpoint: "", model: "" },
+};
+
+/** 设置页底部标签页(按类型归拢散乱配置;详见 docs/设置页重构-分类方案-2026-06-16.md) */
+export type SettingsTab =
+  | "brain" // 大脑:对话大模型
+  | "models" // 功能模型:OCR / Embedding 等调云端 API 的工具型模型
+  | "kb" // 知识库:本地法律知识库 + 语义索引
+  | "datasource" // 数据源:元典 + 外部 MCP(企查查/万得/北大法宝)
+  | "toggles" // 功能开关:首页清爽开关
+  | "general"; // 通用:个人信息 / 加群 / 快递100
+
+const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof Brain }[] = [
+  { id: "general", label: "通用", icon: User },
+  { id: "brain", label: "大脑", icon: Brain },
+  { id: "models", label: "功能模型", icon: Wrench },
+  { id: "kb", label: "知识库", icon: BookText },
+  { id: "datasource", label: "数据源", icon: Database },
+  { id: "toggles", label: "功能开关", icon: SlidersHorizontal },
+];
 
 interface Props {
   /** modal 模式下必填(用户点 X / 蒙层 / Escape / 保存成功 都调它);page 模式可选 */
@@ -65,6 +119,9 @@ interface Props {
    *  父组件需要重判依赖项,比如右上角 DeepSeek 余额 chip 的可见性)。
    *  modal 模式下保存成功直接 onClose,父组件那侧已经会重读 settings,不需要这个。 */
   onSaved?: () => void;
+  /** 2026-06-16 · 进入设置时初始落在哪个 tab。默认 "general"(通用);
+   *  导入缺 LLM key 跳设置时父组件传 "brain" 深链到大脑。 */
+  initialTab?: SettingsTab;
 }
 
 /**
@@ -84,6 +141,7 @@ export function SettingsModal({
   mode = "modal",
   onDirtyChange,
   onSaved,
+  initialTab,
 }: Props) {
   const isPage = mode === "page";
   const handleClose = () => {
@@ -96,6 +154,9 @@ export function SettingsModal({
   const [saved, setSaved] = useState(false); // page 模式下保存成功显示 toast(modal 模式直接关闭)
   // 2026-05-25 V0.1.8 · 是否有未保存改动(page 模式上报给父组件做切 tab 防呆)
   const [dirty, setDirty] = useState(false);
+  // 2026-06-16 · 设置页内部标签页。默认「通用」(作者要求点开设置先看通用);
+  // 导入缺 LLM key 跳设置时父组件传 initialTab="brain" 深链到大脑(a92ae91 校验的是 LLM key)。
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
 
   // 2026-05-25 V0.1.6 · token 在线验证状态
   const [mineruStatus, setMineruStatus] = useState<VerifyStatus>("idle");
@@ -108,6 +169,9 @@ export function SettingsModal({
   // 2026-06-15 · MiniMax API key 在线验证状态
   const [minimaxStatus, setMinimaxStatus] = useState<VerifyStatus>("idle");
   const [minimaxMsg, setMinimaxMsg] = useState<string>("");
+  // 2026-06-16 · 通用 OpenAI 兼容后端(GLM/MiMo/自定义)在线验证状态
+  const [compatStatus, setCompatStatus] = useState<VerifyStatus>("idle");
+  const [compatMsg, setCompatMsg] = useState<string>("");
   // 2026-05-25 V0.1.8 · 元典 API key 在线验证状态
   const [yuandianStatus, setYuandianStatus] = useState<VerifyStatus>("idle");
   const [yuandianMsg, setYuandianMsg] = useState<string>("");
@@ -129,6 +193,9 @@ export function SettingsModal({
     if (settings.minimax_verified_at && minimaxStatus === "idle") {
       setMinimaxStatus("ok");
     }
+    if (settings.compat_llm_verified_at && compatStatus === "idle") {
+      setCompatStatus("ok");
+    }
     if (settings.yuandian_verified_at && yuandianStatus === "idle") {
       setYuandianStatus("ok");
     }
@@ -141,6 +208,8 @@ export function SettingsModal({
     settings?.mineru_verified_at,
     settings?.paddle_vl_verified_at,
     settings?.deepseek_verified_at,
+    settings?.minimax_verified_at,
+    settings?.compat_llm_verified_at,
     settings?.yuandian_verified_at,
   ]);
 
@@ -252,6 +321,59 @@ export function SettingsModal({
       setMinimaxMsg(String(e));
       updateField("minimax_verified_at", null);
     }
+  }
+
+  async function handleVerifyCompat() {
+    if (!settings?.compat_llm_api_key?.trim()) {
+      setCompatStatus("fail");
+      setCompatMsg("请先填入 API Key");
+      return;
+    }
+    setCompatStatus("verifying");
+    setCompatMsg("");
+    try {
+      const r = await verifyOpenAICompatKey(
+        settings.compat_llm_api_key,
+        settings.compat_llm_endpoint ?? "",
+        settings.compat_llm_model ?? "",
+      );
+      if (r.ok) {
+        setCompatStatus("ok");
+        setCompatMsg("");
+        updateField("compat_llm_verified_at", new Date().toISOString());
+      } else {
+        setCompatStatus("fail");
+        setCompatMsg(r.message);
+        updateField("compat_llm_verified_at", null);
+      }
+    } catch (e) {
+      setCompatStatus("fail");
+      setCompatMsg(String(e));
+      updateField("compat_llm_verified_at", null);
+    }
+  }
+
+  // 切换云端 AI 后端。deepseek→存 null(默认);minimax→"minimax";glm/mimo/custom→预填兼容配置。
+  function handleChangeBackend(value: string) {
+    if (value === "minimax") {
+      updateField("cloud_llm_backend", "minimax");
+      return;
+    }
+    const preset = COMPAT_PRESETS[value];
+    if (preset) {
+      // 切到通用兼容服务商:预填 endpoint/model,清空 key + 验证态(各家 key 不通用)
+      updateFields({
+        cloud_llm_backend: value,
+        compat_llm_endpoint: preset.endpoint || null,
+        compat_llm_model: preset.model || null,
+        compat_llm_api_key: null,
+        compat_llm_verified_at: null,
+      });
+      setCompatStatus("idle");
+      setCompatMsg("");
+      return;
+    }
+    updateField("cloud_llm_backend", null); // deepseek / 默认
   }
 
   async function handleVerifyYuandian() {
@@ -371,6 +493,12 @@ export function SettingsModal({
     setDirty(true);
   }
 
+  // 一次更新多个字段(切换云端服务商时:backend + 预填 endpoint/model + 清 key/verified 要原子改)
+  function updateFields(patch: Partial<Settings>) {
+    setSettings((prev) => (prev ? { ...prev, ...patch } : prev));
+    setDirty(true);
+  }
+
   // page 模式:没有蒙层,卡片直接占主区域,scroll 由父容器管;不带 X 按钮
   // modal 模式:蒙层 + max-h 限高 + X 按钮(原有形态)
   // 注意:不能用内嵌函数组件 wrap children,那会让每次 render 重建组件类型 → 子树 unmount + state 丢失
@@ -412,6 +540,30 @@ export function SettingsModal({
             </div>
           )}
           {!loading && settings && (
+            <>
+            {/* 2026-06-16 · 标签页导航:按类型归拢散乱配置 */}
+            <div className="mb-5 flex flex-wrap gap-1.5 border-b border-border pb-3">
+              {SETTINGS_TABS.map((t) => {
+                const Icon = t.icon;
+                const active = tab === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setTab(t.id)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                      active
+                        ? "bg-sky-50 text-sky-700 ring-1 ring-sky-200"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                    )}
+                  >
+                    <Icon className="size-4" />
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
             <div
               className={cn(
                 // page 模式:每个功能区各占一半,左右成对(更简洁、少占行);
@@ -422,10 +574,11 @@ export function SettingsModal({
                   : "space-y-6",
               )}
             >
-              {/* 第一排:个人信息 | 日程日历 | 加群二维码(独立 3 列;下方 2 列配对不受影响) */}
-              <div className="lg:col-span-2">
-                <div className="grid grid-cols-1 items-stretch gap-5 lg:grid-cols-3">
-                  {/* 个人信息 */}
+              {/* ── 通用:界面字号(放最前,字小问题最常见)── */}
+              {tab === "general" && <FontScaleCard />}
+
+              {/* ── 通用:个人信息 ── */}
+              {tab === "general" && (
                   <Section title="个人信息" fill>
                     <Field
                       label="称呼"
@@ -445,8 +598,10 @@ export function SettingsModal({
                       />
                     </Field>
                   </Section>
+              )}
 
-                  {/* 首页日程日历开关 */}
+              {/* ── 功能开关:首页日程日历 ── */}
+              {tab === "toggles" && (
                   <Section
                     title="首页日程日历(可选)"
                     desc="把开庭/续封、带日期的待办、手动提醒汇总到首页日历;默认关闭,想体验就开,随时可关。"
@@ -486,9 +641,10 @@ export function SettingsModal({
                       </button>
                     </label>
                   </Section>
+              )}
 
-                  {/* 交流群:标题"微信扫码加群" + 缩略图,悬停放大到正常尺寸
-                      (托管 lawtools.top,过期换图不必重新发版) */}
+              {/* ── 通用:微信扫码加群(缩略图悬停放大;托管 lawtools.top,过期换图不必重新发版) ── */}
+              {tab === "general" && (
                   <Section title="微信扫码加群" fill>
                     <div className="flex items-center gap-3">
                       <div className="group relative shrink-0">
@@ -509,12 +665,85 @@ export function SettingsModal({
                       </p>
                     </div>
                   </Section>
-                </div>
-              </div>
+              )}
 
               {/* V0.3:本地模型已隐藏 → 只走云端。三个 API key(MinerU / DeepSeek / 元典)常显,
                   不再用 cloud_enabled 开关包裹(该字段保留兼容,前端不再读)。 */}
-              <>
+              {/* ── 功能模型:PaddleOCR(云端 OCR,排在 MinerU 前)──
+                  2026-06-12:PaddleOCR VL-1.6(AI Studio)。填了 key 即自动成为
+                  另一家的备用(失败/超时/额度用完自动切换);也可在下方「云端 OCR 主力」卡切为主力。
+                  实测:精度与 MinerU 打平,速度约快一倍,免费 2 万页/天(MinerU 1 千页/天);
+                  单文件 >100 页会自动落回 MinerU。 */}
+              {tab === "models" && (
+                  <Section
+                    title="PaddleOCR(云端 OCR)"
+                    link={{
+                      label: "点这里申请访问令牌",
+                      href: "https://aistudio.baidu.com/account/accessToken",
+                    }}
+                  >
+                    <Field
+                      label="访问令牌"
+                      hint="选填。填了即自动成为另一家 OCR 的备用线路;免费额度 2 万页/天"
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="password"
+                          value={settings.paddle_vl_api_key ?? ""}
+                          onChange={(e) => {
+                            updateField(
+                              "paddle_vl_api_key",
+                              e.target.value || null,
+                            );
+                            // 改 token 就重置验证状态;清空 token 时主力退回 MinerU
+                            if (paddleStatus !== "idle") {
+                              setPaddleStatus("idle");
+                              setPaddleMsg("");
+                              updateField("paddle_vl_verified_at", null);
+                            }
+                            if (!e.target.value) {
+                              updateField("ocr_cloud_primary", null);
+                            }
+                          }}
+                          placeholder="AI Studio 访问令牌"
+                          className={cn(inputCls, "flex-1")}
+                          autoComplete="off"
+                        />
+                        <VerifyStatusIcon status={paddleStatus} />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="disabled:cursor-not-allowed"
+                          onClick={handleVerifyPaddle}
+                          disabled={
+                            paddleStatus === "verifying" ||
+                            !settings.paddle_vl_api_key?.trim()
+                          }
+                        >
+                          {paddleStatus === "verifying" ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            "验证"
+                          )}
+                        </Button>
+                      </div>
+                      {paddleStatus === "fail" && paddleMsg && (
+                        <p className="mt-1.5 text-xs text-red-600">
+                          ✗ {paddleMsg}
+                        </p>
+                      )}
+                      {paddleStatus === "ok" && (
+                        <p className="mt-1.5 text-xs text-green-700">
+                          ✓ 已验证通过,可以使用
+                        </p>
+                      )}
+                    </Field>
+                  </Section>
+              )}
+
+              {/* ── 功能模型:MinerU(云端 OCR)── */}
+              {tab === "models" && (
                   <Section
                     title="MinerU"
                     link={{ label: "点这里申请 token", href: "https://mineru.net/apiManage/token" }}
@@ -568,8 +797,49 @@ export function SettingsModal({
                       )}
                     </Field>
                   </Section>
+              )}
 
-              {/* 元典法律开放平台 — 法规/案例/企业信息检索 + 执行查被执行人,跟云端 LLM 独立 */}
+              {/* ── 功能模型:云端 OCR 主力(主副选择,单独卡,默认就显示)── */}
+              {tab === "models" && (
+                  <Section
+                    title="云端 OCR 主力"
+                    desc="MinerU 与 PaddleOCR 谁当主力:主力失败、排队超时或额度用完时,自动切到另一家,无需手动干预。"
+                  >
+                    <Field label="选择主力">
+                      <select
+                        value={
+                          settings.ocr_cloud_primary === "paddle-vl"
+                            ? "paddle-vl"
+                            : "mineru"
+                        }
+                        onChange={(e) =>
+                          updateField(
+                            "ocr_cloud_primary",
+                            e.target.value === "paddle-vl" ? "paddle-vl" : null,
+                          )
+                        }
+                        className={inputCls}
+                      >
+                        <option value="paddle-vl">
+                          PaddleOCR 主力,MinerU 备用(推荐 · 更快、额度更高)
+                        </option>
+                        <option value="mineru">
+                          MinerU 主力,PaddleOCR 备用
+                        </option>
+                      </select>
+                      <p className="mt-1.5 rounded-md bg-sky-50 px-2.5 py-1.5 text-caption text-sky-800">
+                        建议用 <strong>PaddleOCR 为主、MinerU 备用</strong> ——
+                        PaddleOCR 速度更快、免费额度更高(2 万页/天 vs MinerU 1 千页/天),
+                        批量导入更不容易卡。
+                        {!settings.paddle_vl_api_key?.trim() &&
+                          "(需先在上方「PaddleOCR」卡填访问令牌)"}
+                      </p>
+                    </Field>
+                  </Section>
+              )}
+
+              {/* ── 数据源:元典法律开放平台(法规/案例/企业检索 + 执行查被执行人)── */}
+              {tab === "datasource" && (
               <Section
                 title="元典法律开放平台"
                 desc="查询法律法规、裁判案例、企业信息的数据源"
@@ -630,30 +900,33 @@ export function SettingsModal({
                   )}
                 </Field>
               </Section>
+              )}
 
+              {/* ── 大脑:云端 AI 后端 + DeepSeek / MiniMax(切换后只显示所选后端)── */}
+              {tab === "brain" && (
+                <>
                   <Section title="云端 AI 后端">
                     <Field label="提供商">
                       <select
                         value={settings.cloud_llm_backend ?? "deepseek"}
-                        onChange={(e) =>
-                          updateField(
-                            "cloud_llm_backend",
-                            e.target.value === "minimax" ? "minimax" : null,
-                          )
-                        }
+                        onChange={(e) => handleChangeBackend(e.target.value)}
                         className={inputCls}
                       >
-                        <option value="deepseek">DeepSeek(默认)</option>
-                        <option value="minimax">MiniMax(M 系列)</option>
+                        {CLOUD_BACKEND_OPTIONS.map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.label}
+                          </option>
+                        ))}
                       </select>
                       <p className="mt-1 text-label text-muted-foreground">
-                        切换后下面只显示所选后端的配置,两边的 Key
-                        各自独立保存、互不覆盖。
+                        切换后下面只显示所选后端的配置。DeepSeek / MiniMax 的 Key
+                        各自独立保存;GLM / MiMo / 自定义共用一组「OpenAI
+                        兼容」配置,换服务商会重填地址/模型并清空 Key(各家 Key 不通用)。
                       </p>
                     </Field>
                   </Section>
 
-                  {(settings.cloud_llm_backend ?? "deepseek") !== "minimax" && (
+                  {(settings.cloud_llm_backend ?? "deepseek") === "deepseek" && (
                   <Section
                     title="DeepSeek"
                     link={{
@@ -822,110 +1095,128 @@ export function SettingsModal({
                         /v1/text/chatcompletion_v2 由后端自动补 → 不暴露输入框。 */}
                   </Section>
                   )}
+
+                  {/* ── 通用 OpenAI 兼容后端(GLM / MiMo / 自定义)── */}
+                  {["glm", "mimo", "custom"].includes(
+                    settings.cloud_llm_backend ?? "",
+                  ) &&
+                    (() => {
+                      const cur = settings.cloud_llm_backend ?? "custom";
+                      const preset = COMPAT_PRESETS[cur] ?? COMPAT_PRESETS.custom;
+                      // 改 key/模型/地址 → 清验证态(坑#11:改了要重验)
+                      const onConfigChange = () => {
+                        if (compatStatus !== "idle") {
+                          setCompatStatus("idle");
+                          setCompatMsg("");
+                          updateField("compat_llm_verified_at", null);
+                        }
+                      };
+                      return (
+                        <Section
+                          title={preset.label}
+                          desc="OpenAI 兼容云端 LLM(模型名 / 接口地址都可改;改了请重新验证)"
+                          link={
+                            preset.applyUrl
+                              ? {
+                                  label: "申请 / 查看 API Key",
+                                  href: preset.applyUrl,
+                                }
+                              : undefined
+                          }
+                        >
+                          <Field label="API Key">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="password"
+                                value={settings.compat_llm_api_key ?? ""}
+                                onChange={(e) => {
+                                  updateField(
+                                    "compat_llm_api_key",
+                                    e.target.value || null,
+                                  );
+                                  onConfigChange();
+                                }}
+                                placeholder="填入服务商平台的 API Key"
+                                className={cn(inputCls, "flex-1")}
+                                autoComplete="off"
+                              />
+                              <VerifyStatusIcon status={compatStatus} />
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="disabled:cursor-not-allowed"
+                                onClick={handleVerifyCompat}
+                                disabled={
+                                  compatStatus === "verifying" ||
+                                  !settings.compat_llm_api_key?.trim()
+                                }
+                              >
+                                {compatStatus === "verifying" ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  "验证"
+                                )}
+                              </Button>
+                            </div>
+                            {compatStatus === "fail" && compatMsg && (
+                              <p className="mt-1.5 text-xs text-red-600">
+                                ✗ {compatMsg}
+                              </p>
+                            )}
+                            {compatStatus === "ok" && (
+                              <p className="mt-1.5 text-xs text-green-700">
+                                ✓ 已验证通过,可以使用
+                              </p>
+                            )}
+                          </Field>
+                          <Field
+                            label="模型名"
+                            hint="具体型号,以服务商控制台为准(如 glm-4.6 / mimo-v2.5)"
+                          >
+                            <input
+                              type="text"
+                              value={settings.compat_llm_model ?? ""}
+                              onChange={(e) => {
+                                updateField(
+                                  "compat_llm_model",
+                                  e.target.value || null,
+                                );
+                                onConfigChange();
+                              }}
+                              placeholder="如 glm-4.6"
+                              className={inputCls}
+                              autoComplete="off"
+                            />
+                          </Field>
+                          <Field
+                            label="接口地址"
+                            hint="OpenAI 兼容的 chat completions 完整地址;只填到 base 会自动补 /v1/chat/completions"
+                          >
+                            <input
+                              type="text"
+                              value={settings.compat_llm_endpoint ?? ""}
+                              onChange={(e) => {
+                                updateField(
+                                  "compat_llm_endpoint",
+                                  e.target.value || null,
+                                );
+                                onConfigChange();
+                              }}
+                              placeholder="https://.../v1/chat/completions"
+                              className={inputCls}
+                              autoComplete="off"
+                            />
+                          </Field>
+                        </Section>
+                      );
+                    })()}
                 </>
+              )}
 
-                  {/* 2026-06-12:PaddleOCR VL-1.6(AI Studio)。填了 key 即自动成为
-                      MinerU 的备用(失败/超时/额度用完自动切换);也可切为主力。
-                      实测:精度与 MinerU 打平,速度约快一倍,免费 2 万页/天(MinerU 1 千页/天);
-                      单文件 >100 页会自动落回 MinerU。 */}
-                  <Section
-                    title="PaddleOCR(云端 OCR 备用)"
-                    link={{
-                      label: "点这里申请访问令牌",
-                      href: "https://aistudio.baidu.com/account/accessToken",
-                    }}
-                  >
-                    <Field
-                      label="访问令牌"
-                      hint="选填。填了即自动成为 MinerU 的备用线路;免费额度 2 万页/天"
-                    >
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="password"
-                          value={settings.paddle_vl_api_key ?? ""}
-                          onChange={(e) => {
-                            updateField(
-                              "paddle_vl_api_key",
-                              e.target.value || null,
-                            );
-                            // 改 token 就重置验证状态;清空 token 时主力退回 MinerU
-                            if (paddleStatus !== "idle") {
-                              setPaddleStatus("idle");
-                              setPaddleMsg("");
-                              updateField("paddle_vl_verified_at", null);
-                            }
-                            if (!e.target.value) {
-                              updateField("ocr_cloud_primary", null);
-                            }
-                          }}
-                          placeholder="AI Studio 访问令牌"
-                          className={cn(inputCls, "flex-1")}
-                          autoComplete="off"
-                        />
-                        <VerifyStatusIcon status={paddleStatus} />
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="disabled:cursor-not-allowed"
-                          onClick={handleVerifyPaddle}
-                          disabled={
-                            paddleStatus === "verifying" ||
-                            !settings.paddle_vl_api_key?.trim()
-                          }
-                        >
-                          {paddleStatus === "verifying" ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            "验证"
-                          )}
-                        </Button>
-                      </div>
-                      {paddleStatus === "fail" && paddleMsg && (
-                        <p className="mt-1.5 text-xs text-red-600">
-                          ✗ {paddleMsg}
-                        </p>
-                      )}
-                      {paddleStatus === "ok" && (
-                        <p className="mt-1.5 text-xs text-green-700">
-                          ✓ 已验证通过,可以使用
-                        </p>
-                      )}
-                    </Field>
-                    {settings.paddle_vl_api_key?.trim() && (
-                      <Field
-                        label="云端 OCR 主力"
-                        hint="主力失败、排队超时或额度用完时,自动切换到另一家;无需手动干预"
-                      >
-                        <select
-                          value={
-                            settings.ocr_cloud_primary === "paddle-vl"
-                              ? "paddle-vl"
-                              : "mineru"
-                          }
-                          onChange={(e) =>
-                            updateField(
-                              "ocr_cloud_primary",
-                              e.target.value === "paddle-vl"
-                                ? "paddle-vl"
-                                : null,
-                            )
-                          }
-                          className={inputCls}
-                        >
-                          <option value="mineru">
-                            MinerU 主力,PaddleOCR 备用(默认)
-                          </option>
-                          <option value="paddle-vl">
-                            PaddleOCR 主力,MinerU 备用(更快、额度更高)
-                          </option>
-                        </select>
-                      </Field>
-                    )}
-                  </Section>
-
-              {/* 硅基流动 — Embedding 语义检索,填了才启用,否则回退关键词选材料。
-                  接口地址 / 模型不暴露:留空后端默认硅基流动 bge-m3(免费),不需要改。 */}
+              {/* ── 功能模型:硅基流动(Embedding 语义检索;留空后端默认 bge-m3 免费)──
+                  填了才启用,否则回退关键词选材料。接口地址 / 模型不暴露。 */}
+              {tab === "models" && (
               <Section
                 title="硅基流动 API"
                 desc="Embedding 语义检索 · 云端 API 服务"
@@ -980,73 +1271,53 @@ export function SettingsModal({
                   )}
                 </Field>
               </Section>
+              )}
 
-              {/* 法律向量检索维护(法条+案例+企业语义索引)— 公开功能 */}
+              {/* ── 知识库:法律向量检索维护(法条+案例+企业语义索引)── */}
+              {tab === "kb" && (
               <KbSemanticIndexCard
                 embeddingConfigured={!!settings.embedding_api_key?.trim()}
                 autoIndex={settings.kb_semantic_auto_index !== false}
                 onAutoChange={(v) => updateField("kb_semantic_auto_index", v)}
               />
+              )}
 
-              {/* 快递100 — 快递查询工具用(寄送达 / 材料追踪),独立可选 */}
-              <Section
-                title="快递100"
-                desc="工具页「快递查询」用"
-                link={{
-                  label: "点这里申请 customer / key",
-                  href: "https://api.kuaidi100.com/",
-                }}
-              >
-                <Field label="customer(授权码)">
-                  <input
-                    type="text"
-                    value={settings.kuaidi100_customer ?? ""}
-                    onChange={(e) =>
-                      updateField("kuaidi100_customer", e.target.value || null)
-                    }
-                    placeholder="快递100 后台的 customer"
-                    className={inputCls}
-                    autoComplete="off"
-                  />
-                </Field>
-                <Field label="key(授权 key)">
-                  <input
-                    type="password"
-                    value={settings.kuaidi100_key ?? ""}
-                    onChange={(e) =>
-                      updateField("kuaidi100_key", e.target.value || null)
-                    }
-                    placeholder="快递100 后台的 key"
-                    className={inputCls}
-                    autoComplete="off"
-                  />
-                </Field>
-              </Section>
+              {/* 快递100 配置已迁到「法律工具 → 快递查询」页内,就近配置(2026-06-16)。 */}
 
-              {/* V0.2 D7 · 元典积分账(本月统计) */}
+              {/* ── 数据源:元典积分账(本月统计)── */}
+              {tab === "datasource" && (
               <YuandianCreditsCard
                 monthlyLimit={settings.yuandian_monthly_credit_limit ?? null}
                 onLimitChange={(n) =>
                   updateField("yuandian_monthly_credit_limit", n)
                 }
               />
+              )}
 
-              {/* V0.2 D7 · 本地知识库三态卡 */}
+              {/* ── 知识库:本地知识库三态卡 ── */}
+              {tab === "kb" && (
               <LocalKbCard
                 kbRoot={settings.local_kb_root ?? null}
                 kbEnabled={settings.local_kb_enabled !== false}
                 onKbRootChange={(p) => updateField("local_kb_root", p)}
                 onKbEnabledChange={(b) => updateField("local_kb_enabled", b)}
               />
+              )}
 
               {/* V0.3:本地模型已隐藏 → 删「各模块走本机/云端」切换器 + 本机模型(ollama)配置段。
                   字段(ocr_provider/llm_provider/ollama_*)保留在后端/types,以后接新本地模型再恢复 UI。 */}
 
-              {/* V0.3.6 · 外部工具(MCP)白名单 —— 整宽,AI 助手消费外部 MCP server 工具 */}
+              {/* ── 功能开关:首页清爽开关(featureFlags)── */}
+              {tab === "toggles" && <FeatureFlagsCard />}
+
+              {/* ── 数据源:外部工具(MCP)白名单(企查查/万得/北大法宝 等远程 HTTP)──
+                  整宽,AI 助手消费外部 MCP server 工具 */}
+              {tab === "datasource" && (
               <McpServersCard
                 servers={settings.mcp_servers ?? []}
                 onChange={(next) => updateField("mcp_servers", next)}
               />
+              )}
 
 
               {/* 错误展示 */}
@@ -1059,6 +1330,7 @@ export function SettingsModal({
                 </div>
               )}
             </div>
+            </>
           )}
 
           {/* 作者署名 */}
@@ -1237,6 +1509,131 @@ function Field({
         </span>
       )}
     </label>
+  );
+}
+
+/**
+ * 2026-06-16 · 首页功能开关卡(「功能开关」tab)。
+ * 作者偏好清爽首页:新功能默认关,想用再开,逐设备生效(localStorage)。
+ * 以后首页新增模块 → 在 src/lib/featureFlags.ts 的 FEATURE_FLAGS 加一条,这里自动出现开关。
+ * 只渲染 location==="settings" 的开关;location==="feature" 的(如滴答待办)由对应功能页自己放。
+ */
+function FeatureFlagsCard() {
+  const flags = FEATURE_FLAGS.filter((f) => f.location === "settings");
+  if (flags.length === 0) return null;
+  return (
+    <Section
+      title="首页功能开关"
+      desc="作者偏好清爽首页:这些首页模块默认关闭,想用哪个再开。只影响这台机器的界面,不动数据。"
+    >
+      <div className="space-y-1">
+        {flags.map((f) => (
+          <FeatureFlagToggle key={f.name} name={f.name} />
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+function FeatureFlagToggle({
+  name,
+}: {
+  name: (typeof FEATURE_FLAGS)[number]["name"];
+}) {
+  const [on, setOn] = useFeatureFlag(name);
+  const meta = FEATURE_FLAGS.find((f) => f.name === name)!;
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-background/50 p-3">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-foreground">{meta.title}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {meta.description}
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={meta.title}
+        onClick={() => setOn(!on)}
+        className={cn(
+          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
+          on ? "bg-sky-600" : "bg-muted",
+        )}
+      >
+        <span
+          className={cn(
+            "inline-block size-4 rounded-full bg-white shadow transition-transform",
+            on ? "translate-x-4" : "translate-x-0.5",
+          )}
+        />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 2026-06-16 · 界面字号微调卡(「通用」tab)。有用户反映字小 → 全局等比缩放
+ * (改根字号,Tailwind rem 单位连字带间距一起放大)。逐设备 localStorage,实时生效。
+ */
+function FontScaleCard() {
+  const [scale, setScale] = useFontScale();
+  const pct = Math.round(scale * 100);
+  const presets: { label: string; v: number }[] = [
+    { label: "小", v: 0.9 },
+    { label: "标准", v: 1.0 },
+    { label: "大", v: 1.15 },
+    { label: "特大", v: 1.3 },
+  ];
+  return (
+    <Section
+      title="界面字号"
+      desc="觉得字小就调大 —— 整个界面(文字 + 间距)等比缩放。只影响这台机器,随时可调。"
+    >
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-muted-foreground">当前缩放</span>
+          <span className="text-sm font-semibold text-foreground">{pct}%</span>
+        </div>
+        <input
+          type="range"
+          min={FONT_SCALE.MIN}
+          max={FONT_SCALE.MAX}
+          step={FONT_SCALE.STEP}
+          value={scale}
+          onChange={(e) => setScale(parseFloat(e.target.value))}
+          className="w-full accent-sky-600"
+          aria-label="界面字号缩放"
+        />
+        <div className="flex flex-wrap items-center gap-1.5">
+          {presets.map((p) => (
+            <button
+              key={p.label}
+              type="button"
+              onClick={() => setScale(p.v)}
+              className={cn(
+                "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                Math.abs(scale - p.v) < 0.001
+                  ? "border-sky-300 bg-sky-50 text-sky-700"
+                  : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
+              )}
+            >
+              {p.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setScale(FONT_SCALE.DEFAULT)}
+            className="ml-auto rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            重置
+          </button>
+        </div>
+        <p className="rounded-md bg-muted/40 px-3 py-2 text-xs text-foreground">
+          示例:这行字会随缩放即时变大变小,调到看着舒服为止。
+        </p>
+      </div>
+    </Section>
   );
 }
 

@@ -109,6 +109,21 @@ pub struct Settings {
     /// MiniMax key 验证通过时间(坑#11:新 cloud key 必配 verified_at,改 key 重置)。
     pub minimax_verified_at: Option<String>,
 
+    /// 2026-06-16:通用 OpenAI 兼容云端 LLM 后端(智谱 GLM / 小米 MiMo / 自定义)。
+    /// `cloud_llm_backend` 取 `"glm"` / `"mimo"` / `"custom"` 时改读下面这组 `compat_llm_*`。
+    /// **纯增量调和**:DeepSeek(`cloud_llm_*`+档位)/ MiniMax(`minimax_*`+v2 协议)两条老路完全不动;
+    /// 这条走标准 `/v1/chat/completions`,模型名是用户**显式填的具体型号**(不套 DeepSeek 的 flash/pro 档位,
+    /// 同 MiniMax 处理)。glm/mimo/custom 共用这一组字段(同一时刻只激活一个后端)——
+    /// 切换具体服务商时前端会重填 endpoint/model 并清空 key+verified(各家 key 不通用)。
+    /// 预设默认值见 `llm::providers`。
+    pub compat_llm_endpoint: Option<String>,
+    /// 通用兼容后端模型名(具体型号,如 `glm-4.6`;自由文本,以服务商控制台为准)。
+    pub compat_llm_model: Option<String>,
+    /// 通用兼容后端 API key(独立于 DeepSeek / MiniMax)。
+    pub compat_llm_api_key: Option<String>,
+    /// 通用兼容后端 key 验证通过时间(坑#11)。
+    pub compat_llm_verified_at: Option<String>,
+
     /// 2026-05-24 k:元典法律开放平台 API key — 执行案件查被执行人 / 失信 / 财产线索 用
     /// 申请:https://open.chineselaw.com/
     pub yuandian_api_key: Option<String>,
@@ -156,6 +171,30 @@ pub struct Settings {
     /// 该功能与待办清单略重复且卡片较大,做成可选 —— 用户在设置里手动打开体验,
     /// 不好用可关掉,不影响其他功能。`#[serde(default)]` → 老 settings.json 缺此字段时为 false。
     pub home_calendar_enabled: bool,
+
+    // ===== 2026-06-17 飞书日历(整合外部贡献 PR #9,gcheng-001;精简为只读日历)=====
+    /// 飞书日历总开关。默认关闭;启用后复用本机 lark-cli 的登录态,不在 CaseBoard 保存飞书 token。
+    /// 配好并打开后,首页显示飞书日历月历视图(替代本地"日程日历"卡片)。
+    pub feishu_enabled: Option<bool>,
+    /// lark-cli 可执行文件路径。`None`/空 = 按平台自动找(macOS 走 Homebrew,Windows/Linux 靠 PATH)。
+    /// Windows 用户可在此填 `lark-cli.exe` 全路径(没加进 PATH 时)。
+    pub feishu_lark_cli_path: Option<String>,
+    /// (可选)飞书"案件池"多维表格 App Token。配了才能"点日历事件→反查并导入本地案件目录"。
+    pub feishu_app_token: Option<String>,
+    /// (可选)飞书"案件池"多维表格 Table ID(配合 app_token)。
+    pub feishu_cases_table_id: Option<String>,
+
+    // ===== 2026-06-17 辅助在线立案(整合外部贡献 PR #8,gcheng-001)=====
+    /// 立案 CLI 包根目录。None = 用应用内置 standalone/court_filing_cli(打包进 resources)。
+    pub court_filing_cli_path: Option<String>,
+    /// Python 解释器路径。None = 用 "python3"(Windows 用户需填 "python" 或 venv 内全路径)。
+    pub court_filing_python: Option<String>,
+    /// 全国法院一张网账号(手机号)。只存本机,不进 git。
+    pub court_filing_account: Option<String>,
+    /// 全国法院一张网密码。只存本机,不进 git。
+    pub court_filing_password: Option<String>,
+    /// 一张网登录态 cookie 缓存目录。None = 用默认应用数据目录。
+    pub court_filing_cookie_dir: Option<String>,
 
     // ===== V0.2 D2 新增 · 本地知识库 + chat V2 budget =====
     /// 2026-05-27 V0.2:本地法律知识库根目录(支持 `~/` tilde 展开)。
@@ -206,12 +245,25 @@ impl Settings {
         "cloud"
     }
 
-    /// 云端 LLM 后端(2026-06-15)。缺省 / 空 / 非法值一律回落 `"deepseek"`(老用户零感知)。
+    /// 云端 LLM 后端(2026-06-15;2026-06-16 加 OpenAI 兼容三档)。
+    /// 取值:`"deepseek"`(默认)/ `"minimax"` / `"glm"` / `"mimo"` / `"custom"`。
+    /// 缺省 / 空 / 非法值一律回落 `"deepseek"`(老用户零感知)。
     pub fn effective_cloud_llm_backend(&self) -> &str {
         match self.cloud_llm_backend.as_deref().map(str::trim) {
             Some("minimax") => "minimax",
+            Some("glm") => "glm",
+            Some("mimo") => "mimo",
+            Some("custom") => "custom",
             _ => "deepseek",
         }
+    }
+
+    /// 是否走「通用 OpenAI 兼容」后端(glm / mimo / custom 共用 `compat_llm_*` + 标准 chat 协议)。
+    pub fn cloud_llm_is_compat(&self) -> bool {
+        matches!(
+            self.effective_cloud_llm_backend(),
+            "glm" | "mimo" | "custom"
+        )
     }
 
     /// 云端 OCR 主力(2026-06-12)。`"paddle-vl"` 仅当用户显式选择**且** key 已填才生效,

@@ -44,6 +44,10 @@ export function ProgressBanner({
   let filename: string | null = null;
   let ocrProvider: "local" | "cloud" | null = null;
   let llmProvider: "local" | "cloud" | null = null;
+  // 2026-06-16 V0.3.19 fix:具体模型名(MiniMax-M2.7 / deepseek-v4-flash / mineru / paddle)
+  // 给 BackendChip 用,按 model 判定具体后端而不是写死 "云端 DeepSeek"。
+  let ocrModel: string | undefined = undefined;
+  let llmModel: string | undefined = undefined;
 
   switch (progress.stage) {
     case "started":
@@ -51,6 +55,9 @@ export function ProgressBanner({
       label = `开始处理 ${progress.total} 份文档…`;
       ocrProvider = progress.ocr_provider;
       llmProvider = progress.llm_provider;
+      // 2026-06-16 V0.3.19 fix:Started 事件有 llm_model 字段,BackendChip 按它判断具体后端。
+      // OCR model 暂不传(后端 ProgressEvent 没 ocr_model 字段,OCR 后端默认按 settings.ocr_cloud_primary 显示)
+      llmModel = progress.llm_model;
       break;
     case "doc_started":
       // 2026-05-24 i:并发场景下 index 不能算 percent(回退 bug),DocStarted 没 completed_count,
@@ -59,6 +66,7 @@ export function ProgressBanner({
       filename = progress.filename;
       ocrProvider = progress.ocr_provider;
       llmProvider = progress.llm_provider;
+      // DocStarted 事件没 llm_model,沿用 Started 阶段设的 llmModel 变量
       break;
     case "doc_ocr_status":
       // 不该走到这:App.tsx 把 doc_ocr_status 路由到独立 ocrSub prop,不会塞进 progress。
@@ -219,10 +227,10 @@ export function ProgressBanner({
         {(ocrProvider || llmProvider) && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {ocrProvider && (
-              <BackendChip type="OCR" provider={ocrProvider} />
+              <BackendChip type="OCR" provider={ocrProvider} model={ocrModel} />
             )}
             {llmProvider && (
-              <BackendChip type="LLM" provider={llmProvider} />
+              <BackendChip type="LLM" provider={llmProvider} model={llmModel} />
             )}
           </div>
         )}
@@ -251,19 +259,45 @@ export function ProgressBanner({
 function BackendChip({
   type,
   provider,
+  model,
 }: {
   type: "OCR" | "LLM";
   provider: "local" | "cloud";
+  /** 2026-06-16 V0.3.19 fix:从 progress.llm_model 传进来,按模型名判定具体后端
+   *  (DeepSeek / MiniMax),不再硬编码 "云端 DeepSeek"。
+   *  OCR 后端目前有 2 家(MinerU / PaddleOCR VL),也按 model 字段匹配。 */
+  model?: string;
 }) {
   const isLocal = provider === "local";
-  const label =
-    type === "OCR"
-      ? isLocal
-        ? "🖥️ 本机 MiniCPM-V"
-        : "☁️ 云端 MinerU"
-      : isLocal
-        ? "🖥️ 本机 MiniCPM-V"
-        : "☁️ 云端 DeepSeek";
+  // 按 model 名前缀判定具体后端,fallback 到 provider 默认
+  const lowerModel = (model ?? "").toLowerCase();
+  let label: string;
+  if (type === "OCR") {
+    if (isLocal) {
+      label = "🖥️ 本机 MiniCPM-V";
+    } else if (!model) {
+      // ProgressEvent 没 ocr_model 字段,不知道是 mineru 还是 paddle,显示通用文案
+      label = "☁️ 云端 OCR";
+    } else if (lowerModel.includes("paddle")) {
+      label = "☁️ 云端 PaddleOCR VL";
+    } else {
+      label = "☁️ 云端 MinerU";
+    }
+  } else if (isLocal) {
+    label = "🖥️ 本机 MiniCPM-V";
+  } else if (lowerModel.includes("minimax") || lowerModel.startsWith("m")) {
+    // M 系列 / M2 / M2.7 / M2.7-highspeed / M3 都归为 MiniMax
+    label = "☁️ 云端 MiniMax";
+  } else if (
+    lowerModel.includes("deepseek") ||
+    lowerModel.includes("v4-flash") ||
+    lowerModel.includes("v4-pro")
+  ) {
+    label = "☁️ 云端 DeepSeek";
+  } else {
+    // 未知云端模型 → 显示实际 model 名,避免误标
+    label = model ? `☁️ 云端 ${model}` : "☁️ 云端 LLM";
+  }
   return (
     <span
       className={cn(
