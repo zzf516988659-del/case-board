@@ -1,0 +1,2 @@
+# PR Workflow Scripts for case-board
+# 用法: powershell -ExecutionPolicy Bypass -File scripts/pr/pr-prepare.ps1
