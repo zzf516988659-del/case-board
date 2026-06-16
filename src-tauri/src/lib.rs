@@ -3,6 +3,7 @@ pub mod court_sms;
 pub mod db;
 pub mod deepseek;
 pub mod diagnostic_log;
+pub mod docx_extract;
 pub mod docx_filing;
 pub mod embedding;
 pub mod export;
@@ -135,13 +136,17 @@ fn read_text_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(p).map_err(|e| format!("读文件失败: {}", e))
 }
 
-/// 抽 Word/RTF/ODT 等 office 文档的纯文本(用 macOS 自带 textutil)。
+/// 抽 Word/RTF/ODT 等 office 文档的纯文本。
 ///
-/// V0.1 阶段最简单可靠的方案:`textutil -convert txt -stdout <path>` 把
-/// `.docx / .doc / .rtf / .odt / .html / .webarchive` 都能转纯文本。
+/// 2026-06-15 V0.3.18 fix:跨平台 .docx 解析(替代 macOS textutil)。
+/// 旧实现: `textutil -convert txt -stdout <path>` 把 .docx / .doc / .rtf / .odt 都能转纯文本。
+/// macOS 自带 textutil 没问题,但 Windows / Linux 没有 → "program not found" 错。
+///
+/// 新实现:
+/// - `.docx`(OOXML zip + `word/document.xml`):走 `docx_extract::extract_docx_text`,零外部依赖
+/// - `.doc`(旧二进制 Word 97-2003)/ `.rtf` / `.odt`:macOS 仍可调 textutil,其他平台返回清晰错误
+///
 /// 不依赖 Rust office crate(它们很多在中文场景上有坑),不用 Word 启动开销。
-///
-/// 后续 Layer 2 完整版做 .pdf(走 MinerU/pdfium)。
 #[tauri::command]
 fn extract_doc_text(path: String) -> Result<String, String> {
     let p = Path::new(&path);
@@ -163,25 +168,60 @@ fn extract_doc_text(path: String) -> Result<String, String> {
             DOC_MAX_BYTES / 1024 / 1024
         ));
     }
-    let output = std::process::Command::new("textutil")
-        .arg("-convert")
-        .arg("txt")
-        .arg("-stdout")
-        .arg(&path)
-        .output()
-        .map_err(|e| format!("调 textutil 失败: {}(macOS 自带,正常情况不会出错)", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "textutil 转换失败: {}",
-            if stderr.is_empty() {
-                "未知错误"
-            } else {
-                stderr.trim()
+
+    // 按扩展名分派
+    let ext_lower = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext_lower.as_str() {
+        "docx" => {
+            // 走原生 OOXML 解析
+            match docx_extract::extract_docx_text(&path) {
+                Ok((text, true)) => Ok(text),
+                Ok((_, false)) => Err(".docx 抽取内部失败".into()),
+                Err(e) => Err(e),
             }
-        ));
+        }
+        "doc" | "rtf" | "odt" => {
+            #[cfg(target_os = "macos")]
+            {
+                let output = std::process::Command::new("textutil")
+                    .arg("-convert")
+                    .arg("txt")
+                    .arg("-stdout")
+                    .arg(&path)
+                    .output()
+                    .map_err(|e| format!("调 textutil 失败: {}", e))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!(
+                        "textutil 转换失败: {}",
+                        if stderr.is_empty() {
+                            "未知错误"
+                        } else {
+                            stderr.trim()
+                        }
+                    ));
+                }
+                String::from_utf8(output.stdout).map_err(|e| format!("textutil 输出不是 UTF-8: {}", e))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(format!(
+                    "{} 格式需 macOS 系统的 textutil(本机 {} 不支持)。请在 Word / WPS 里另存为 .docx 后再导入",
+                    ext_lower,
+                    std::env::consts::OS
+                ))
+            }
+        }
+        other => Err(format!(
+            "extract_doc_text 不支持 .{} 格式(.docx / .doc / .rtf / .odt 之外请走 OCR 链路)",
+            other
+        )),
     }
-    String::from_utf8(output.stdout).map_err(|e| format!("textutil 输出不是 UTF-8: {}", e))
 }
 
 /// 纯扫描(不入库),给前端"先看看"用。保留兼容 task #5 时的接口。

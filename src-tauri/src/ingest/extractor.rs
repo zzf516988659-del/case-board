@@ -1,7 +1,7 @@
 //! 单个文档的字段抽取。
 //!
 //! 流程:
-//!   1. 根据文件扩展名分派文本抽取方式(textutil / 直接读 / pdftotext)
+//!   1. 根据文件扩展名分派文本抽取方式(.docx 走原生 OOXML 解析 / .txt/.md 直接读 / .pdf 走 pdf-inspector)
 //!   2. PDF 文本 < 200 字时自动 fallback 到 OCR 后端(按 OcrContext.cloud_enabled 分流)
 //!   3. 图片直接走 OCR 后端
 //!   4. 把抽出的纯文本喂给本机 LLM 抽 7 个字段
@@ -10,12 +10,14 @@
 //! 这一层是纯函数,不碰数据库;数据库写入由 pipeline.rs 编排。
 //!
 //! 2026-05-23 加:PDF 支持(R&D 阶段已在 5 个真实案件上验证)+ OCR 兜底链路 + 云本机分流。
+//! 2026-06-15 V0.3.18 fix:.docx 抽文改用 docx_extract 模块(原生 OOXML),不再调 macOS `textutil`。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::db::metrics::MetricEntry;
+use crate::docx_extract;
 use crate::ingest::ocr::{self, OcrContext};
 use crate::llm::{self, ExtractedFields};
 
@@ -185,12 +187,15 @@ fn text_extraction_kind(filename: &str) -> TextKind {
         || f.ends_with(".htm")
     {
         TextKind::ReadDirect
-    } else if f.ends_with(".docx")
-        || f.ends_with(".doc")
+    } else if f.ends_with(".docx") {
+        // 2026-06-15 V0.3.18 fix:.docx 走原生 OOXML 解析(跨平台,替代 macOS textutil)
+        TextKind::Docx
+    } else if f.ends_with(".doc")
         || f.ends_with(".rtf")
         || f.ends_with(".odt")
     {
-        TextKind::Textutil
+        // 旧 .doc (Word 97-2003 二进制) / RTF / ODT — 需要 macOS textutil 或专门的 crate
+        TextKind::LegacyOffice
     } else if f.ends_with(".pdf") {
         TextKind::Pdf
     } else if is_ocr_image_ext(&f) {
@@ -216,8 +221,11 @@ pub(crate) fn is_ocr_image_ext(lower_filename: &str) -> bool {
 enum TextKind {
     /// 纯文本,直接 fs::read_to_string
     ReadDirect,
-    /// 走 macOS textutil 命令
-    Textutil,
+    /// 2026-06-15 V0.3.18 fix:.docx 走 docx_extract 原生 OOXML 解析(跨平台,替代 macOS textutil)
+    Docx,
+    /// 旧二进制 .doc / RTF / ODT → 走 macOS textutil(macOS 仍可用);其他平台返回明确错误。
+    /// 大多数现代 Word 文档都存成 .docx,旧 .doc 越来越少;这里给清晰提示让用户转 .docx。
+    LegacyOffice,
     /// PDF,走 pdftotext;字数太少 fallback OCR
     Pdf,
     /// 图片,直接走 OCR 后端
@@ -234,23 +242,53 @@ fn extract_text(path: &Path, kind: TextKind) -> Result<(String, &'static str), S
         TextKind::ReadDirect => std::fs::read_to_string(path)
             .map(|t| (t, "read_direct"))
             .map_err(|e| format!("读文件失败: {}", e)),
-        TextKind::Textutil => {
-            let output = std::process::Command::new("textutil")
-                .arg("-convert")
-                .arg("txt")
-                .arg("-stdout")
-                .arg(path)
-                .output()
-                .map_err(|e| format!("调 textutil 失败: {}", e))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "textutil 转换失败: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
+        TextKind::Docx => {
+            // 2026-06-15 V0.3.18 fix:跨平台 .docx 抽取(zip + XML),替代 macOS textutil。
+            // Windows / Linux 上 textutil 不存在,会 "program not found"。
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| format!("路径含非 UTF-8 字符: {:?}", path))?;
+            match docx_extract::extract_docx_text(path_str) {
+                Ok((text, true)) => Ok((text, "docx-rust")),
+                Ok((_, false)) => Err("docx_extract 内部失败".into()),
+                Err(e) => Err(format!(".docx 抽取失败: {}", e)),
             }
-            String::from_utf8(output.stdout)
-                .map(|t| (t, "textutil"))
-                .map_err(|e| format!("textutil 输出不是 UTF-8: {}", e))
+        }
+        TextKind::LegacyOffice => {
+            // .doc (旧二进制) / .rtf / .odt — 没有通用 Rust crate,Windows 走不通。
+            // macOS 仍可调 textutil(原生有),其他平台返回清晰错误提示转 .docx。
+            #[cfg(target_os = "macos")]
+            {
+                let output = std::process::Command::new("textutil")
+                    .arg("-convert")
+                    .arg("txt")
+                    .arg("-stdout")
+                    .arg(path)
+                    .output()
+                    .map_err(|e| format!("调 textutil 失败: {}", e))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "textutil 转换失败: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
+                String::from_utf8(output.stdout)
+                    .map(|t| (t, "textutil"))
+                    .map_err(|e| format!("textutil 输出不是 UTF-8: {}", e))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("?")
+                    .to_lowercase();
+                Err(format!(
+                    "{} 格式需 macOS 系统的 textutil(本机 {} 不支持)。请在 Word / WPS 里另存为 .docx 后再导入",
+                    ext,
+                    std::env::consts::OS
+                ))
+            }
         }
         TextKind::Pdf => {
             // 2026-05-26 V0.1.11 PDF 抽取链路:
