@@ -568,6 +568,7 @@ dependencies = [
  "mdns-sd",
  "pdf-inspector",
  "pulldown-cmark",
+ "quick-xml",
  "regex",
  "reqwest 0.12.28",
  "rfd",
@@ -3531,6 +3532,7 @@ version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
 dependencies = [
+ "encoding_rs",
  "memchr",
 ]
 

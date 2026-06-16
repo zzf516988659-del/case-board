@@ -51,6 +51,9 @@ sha2 = "0.10"
 hmac = "0.12"
 # MinerU HTTP API zip 结果解压(2026-05-25 V0.1.10 加,替代 npm 的 mineru-open-api CLI)
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 2026-06-15 V0.3.18 fix:跨平台 .docx 文本抽取(替代 macOS textutil,Windows/Linux 也能跑)
+# quick-xml 0.39 是 serde_json 间接依赖,但 Rust 要求显式声明,加进直接依赖才能 use
+quick-xml = { version = "0.39", features = ["encoding"] }
 # 2026-05-26 V0.1.11 PDF 文字抽取 + 分类(纯 Rust 零外部依赖)
 # 选 pdf-inspector 而不是 pdf-extract 的理由:
 #   - 提供 PdfType { TextBased, Scanned, ImageBased, Mixed } 分类 + confidence + pages_needing_ocr
