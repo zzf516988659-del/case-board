@@ -525,7 +525,7 @@ export interface LawyerProfile {
   id_number: string | null;
   phone: string | null;
   address: string | null;
-  is_default: number;
+  is_default: boolean;
   created_at: string;
   updated_at: string;
 }
