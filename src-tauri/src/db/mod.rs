@@ -94,7 +94,15 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     // 详见 docs/反馈问题排查-2026-06-15.md。
     reconcile_migration_checksums(&pool).await?;
 
+    // 2026-06-17:set_ignore_missing(true) 容忍「applied but missing in resolved」。
+    // 场景:本二进制用新 migrations 目录,但 DB 是更早版本 binary 跑的(applied 里有 N+1+2
+    // 几条在本 binary 的 migrations 目录里没有)。病根 = 多人多仓发布节奏漂移(开源仓错过
+    // fork 端某次 commit 的 migration 文件;fork 端又漏 commit 某些 SQL)。schema 已正确 apply,
+    // 这些「missing」只是 checksum 比对时一个过激的 tripwire,不是数据问题,应该静默通过。
+    // 配合上面的 reconcile_migration_checksums(把 missing 的几条用内嵌的 checksum 重新对齐),
+    // 后续启动就不会再扫到「missing」行。
     sqlx::migrate!("./migrations")
+        .set_ignore_missing(true)
         .run(&pool)
         .await
         .map_err(|e| DbError::Migrate(e.to_string()))?;
