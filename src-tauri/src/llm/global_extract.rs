@@ -379,13 +379,55 @@ pub async fn extract_combined(
         .await
         .map_err(|e| LlmError::ResponseFormat(e.to_string()))?;
 
-    let content = json
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
+    // 2026-06-17:debug 时记录完整 JSON,排查「无 choices[0].message.content」根因
+    crate::dlog!(
+        "[global_extract] raw response json: {}",
+        serde_json::to_string(&json).unwrap_or_default()
+    );
+
+    // 2026-06-17:多字段 fallback(OpenAI 标准 + MiniMax M 系列 + Anthropic)
+    // 根因: MiniMax M 系列恒思考,某些情况下 finish_reason=length → message.content
+    // 截断为空,但 reasoning_content 还有内容。V0.3.18/19 之前的代码只查 message.content
+    // 一个字段 → "无 content" 误报。
+    let first_choice = json.get("choices").and_then(|c| c.get(0));
+    let first_message = first_choice.and_then(|c| c.get("message"));
+    // 优先取 content 字段(OpenAI 标准 + M 系列正常情况)
+    // 但 content 是空字符串时也算"无效",尝试 reasoning_content 兜底
+    let content_opt: Option<&str> = first_message
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .ok_or_else(|| LlmError::ResponseFormat("无 choices[0].message.content".into()))?;
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            // MiniMax M 系列:content 缺失或空 → reasoning_content 兜底
+            first_message
+                .and_then(|m| m.get("reasoning_content"))
+                .and_then(|c| c.as_str())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| {
+            // 某些非标 API 把文本放顶层 text 字段
+            json.get("text").and_then(|c| c.as_str())
+        });
+    let content = content_opt.ok_or_else(|| {
+        let finish_reason = first_choice
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let usage = json.get("usage");
+        let completion = usage
+            .and_then(|u| u.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let reasoning = usage
+            .and_then(|u| u.get("completion_tokens_details"))
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        LlmError::ResponseFormat(format!(
+            "无 choices[0].message.content (finish_reason={}, completion_tokens={}, reasoning_tokens={})",
+            finish_reason, completion, reasoning
+        ))
+    })?;
 
     // MiniMax M 系列可能把 <think> 块塞进 content 开头 → 用更鲁棒的剥离(剥 think + 取首{到末})。
     let cleaned = if is_minimax {

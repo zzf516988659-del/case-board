@@ -14,11 +14,43 @@
 //! 也不用跟 tokio runtime 抢 subscriber 所有权。
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::sync::Mutex;
 
 const RING_CAPACITY: usize = 200;
 
 static RING: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+/// 2026-06-17:dlog 文件路径,放到 caseboard data 目录下,Windows 端用户能直接 cat 看到。
+/// 仅在 push_log 第一次写时打开文件句柄,之后用 static Mutex<Option<File>> 缓存。
+/// 失败静默(dlog 不能因为写不进文件就让程序挂)。
+static DLOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+fn dlog_file_path() -> Option<std::path::PathBuf> {
+    crate::db::app_data_dir().ok().map(|p| p.join("caseboard-dlog.log"))
+}
+
+fn dlog_append(safe: &str) {
+    let mut guard = match DLOG_FILE.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if guard.is_none() {
+        if let Some(path) = dlog_file_path() {
+            // 追加模式,文件不存在则创建
+            if let Ok(f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                *guard = Some(f);
+            }
+        }
+    }
+    if let Some(f) = guard.as_mut() {
+        let _ = writeln!(f, "{}", safe);
+    }
+}
 
 /// 推一条日志进 ring buffer。同时 `eprintln!` 到原 stderr(开发时仍可见)。
 ///
@@ -27,6 +59,9 @@ pub fn push_log(line: String) {
     // 先脱敏(路径里可能含当事人姓名)
     let safe = crate::feedback::sanitize_paths(&line);
     eprintln!("{}", safe);
+    // 2026-06-17:同时 append 到 caseboard-dlog.log(Windows release 没 stderr,
+    // 否则用户报错后什么都看不到,无法远程排查)
+    dlog_append(&safe);
     if let Ok(mut g) = RING.lock() {
         if g.len() >= RING_CAPACITY {
             g.pop_front();
