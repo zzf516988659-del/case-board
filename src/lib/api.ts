@@ -14,6 +14,7 @@ import type {
   CaseInstance,
   CaseWithDocs,
   CourtFilingJob,
+  CourtFilingEnvReport,
   ExtractedFields,
   FeishuCalendarEvent,
   LawyerProfile,
@@ -651,6 +652,16 @@ export function listCourtFilingJobs(caseId: string): Promise<CourtFilingJob[]> {
 
 export function getCourtFilingJob(id: string): Promise<CourtFilingJob | null> {
   return invoke<CourtFilingJob | null>("get_court_filing_job", { id });
+}
+
+/** 检测在线立案运行环境。 */
+export function courtFilingEnvCheck(): Promise<CourtFilingEnvReport> {
+  return invoke<CourtFilingEnvReport>("court_filing_env_check");
+}
+
+/** 一键安装在线立案运行环境(进度走 court-filing-env-progress 事件)。 */
+export function courtFilingEnvInstall(): Promise<CourtFilingEnvReport> {
+  return invoke<CourtFilingEnvReport>("court_filing_env_install");
 }
 
 export function submitCaptchaAnswer(
@@ -1598,4 +1609,232 @@ export function exportContractRedlineDocx(
     author,
     savePath,
   });
+}
+
+/* ============================================================
+ * 合同起草(非诉 tab · 2026-06-18 · B1)
+ * 后端 contract_draft 模块:口语化需求 → 三观四步法规划(plan)→ 生成合同草案(generate)→ 导出 Word。
+ * 方法论借鉴 pa1nrui1/legal-skills(MIT,小潘律师);prompt/引擎自建。字段与 Rust serde 一致(snake_case)。
+ * ============================================================ */
+
+/** 引导式采集的单个要素(对应 Rust `RequiredField`)。 */
+export interface RequiredField {
+  field: string;
+  why: string;
+  example: string;
+  required: boolean;
+}
+
+/** 起草前规划(对应 Rust `ContractDraftPlan`)。 */
+export interface ContractDraftPlan {
+  contract_type: string;
+  transaction_essence: string;
+  structure_outline: string[];
+  required_info: RequiredField[];
+  clarifying_questions: string[];
+  notes: string;
+}
+
+/** 关键条款及理由(对应 Rust `DraftKeyClause`)。 */
+export interface DraftKeyClause {
+  clause: string;
+  rationale: string;
+}
+
+/** 合同草案结果(对应 Rust `ContractDraftResult`)。 */
+export interface ContractDraftResult {
+  contract_type: string;
+  contract_name: string;
+  draft_md: string;
+  key_clauses: DraftKeyClause[];
+  risks: string[];
+  assumptions: string[];
+  missing_info: string[];
+}
+
+/** 步骤 1-3:起草前规划(类型判定 + 结构大纲 + 引导式采集清单)。stance: party_a/party_b/neutral。 */
+export function planContractDraft(
+  requirement: string,
+  stance: string,
+  contractTypeHint: string,
+): Promise<ContractDraftPlan> {
+  return invoke<ContractDraftPlan>("plan_contract_draft", {
+    requirement,
+    stance,
+    contractTypeHint,
+  });
+}
+
+/** 步骤 4:据已采集信息生成完整合同草案。collectedInfo 为采集清单/追问的回答汇总(可空)。 */
+export function generateContractDraft(
+  requirement: string,
+  stance: string,
+  contractTypeHint: string,
+  collectedInfo: string,
+): Promise<ContractDraftResult> {
+  return invoke<ContractDraftResult>("generate_contract_draft", {
+    requirement,
+    stance,
+    contractTypeHint,
+    collectedInfo,
+  });
+}
+
+/** 导出合同草案为 Word(把 generate 拿到的 draft_md + contract_name 回传)。返回写盘路径。 */
+export function exportContractDraftDocx(
+  draftMd: string,
+  contractName: string,
+  savePath: string,
+): Promise<string> {
+  return invoke<string>("export_contract_draft_docx", {
+    draftMd,
+    contractName,
+    savePath,
+  });
+}
+
+/* ── B2 多轮修订 + 版本管理(对应 Rust contract_draft 落库命令 + db::contract_drafts)── */
+
+/** 修订结果(对应 Rust `ContractReviseResult`)。 */
+export interface ContractReviseResult {
+  draft_md: string;
+  change_summary: string;
+  key_clauses: DraftKeyClause[];
+  risks: string[];
+}
+
+/** 一份合同起草事项(对应 Rust `ContractDraft`)。 */
+export interface ContractDraft {
+  id: string;
+  contract_name: string;
+  contract_type: string;
+  stance: string;
+  requirement: string;
+  status: string; // working / final
+  latest_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 一版合同稿(对应 Rust `ContractDraftVersion`)。 */
+export interface ContractDraftVersion {
+  id: string;
+  draft_id: string;
+  version_no: number;
+  source: string;
+  based_on_version: number | null;
+  purpose: string;
+  draft_md: string;
+  change_summary: string;
+  is_final: number; // 0 / 1
+  created_at: string;
+}
+
+/** 多轮修订:据修订要求把现有合同改成新版(不落库;落库走 addContractDraftVersion)。 */
+export function reviseContractDraft(
+  currentMd: string,
+  feedback: string,
+  stance: string,
+): Promise<ContractReviseResult> {
+  return invoke<ContractReviseResult>("revise_contract_draft", {
+    currentMd,
+    feedback,
+    stance,
+  });
+}
+
+/** 保存一份合同草案(同时落第 1 版)。 */
+export function saveContractDraft(
+  contractName: string,
+  contractType: string,
+  stance: string,
+  requirement: string,
+  draftMd: string,
+): Promise<ContractDraft> {
+  return invoke<ContractDraft>("save_contract_draft", {
+    contractName,
+    contractType,
+    stance,
+    requirement,
+    draftMd,
+  });
+}
+
+/** 全部草案列表(最近更新在前)。 */
+export function listContractDrafts(): Promise<ContractDraft[]> {
+  return invoke<ContractDraft[]>("list_contract_drafts");
+}
+
+/** 某草案的全部版本(版本号升序)。 */
+export function listContractDraftVersions(
+  draftId: string,
+): Promise<ContractDraftVersion[]> {
+  return invoke<ContractDraftVersion[]>("list_contract_draft_versions", { draftId });
+}
+
+/** 追加一版(多轮修订落库)。 */
+export function addContractDraftVersion(
+  draftId: string,
+  source: string,
+  basedOnVersion: number | null,
+  purpose: string,
+  draftMd: string,
+  changeSummary: string,
+): Promise<ContractDraftVersion> {
+  return invoke<ContractDraftVersion>("add_contract_draft_version", {
+    draftId,
+    source,
+    basedOnVersion,
+    purpose,
+    draftMd,
+    changeSummary,
+  });
+}
+
+/** 标记最终版(用户明确确认才调)。 */
+export function markContractDraftFinal(
+  draftId: string,
+  versionId: string,
+): Promise<void> {
+  return invoke<void>("mark_contract_draft_final", { draftId, versionId });
+}
+
+/** 删除草案及其全部版本。 */
+export function deleteContractDraft(id: string): Promise<number> {
+  return invoke<number>("delete_contract_draft", { id });
+}
+
+/* ── B3 起草偏好库(对应 Rust contract_draft 偏好命令 + db::contract_preferences)── */
+
+/** 一条起草偏好(对应 Rust `ContractPreference`)。contract_type 空 = 通用。 */
+export interface ContractPreference {
+  id: string;
+  contract_type: string;
+  topic: string;
+  preference: string;
+  source: string; // user / ai_suggest
+  created_at: string;
+}
+
+/** 新增一条起草偏好(contractType 空 = 通用)。 */
+export function addContractPreference(
+  contractType: string,
+  topic: string,
+  preference: string,
+): Promise<ContractPreference> {
+  return invoke<ContractPreference>("add_contract_preference", {
+    contractType,
+    topic,
+    preference,
+  });
+}
+
+/** 全部起草偏好。 */
+export function listContractPreferences(): Promise<ContractPreference[]> {
+  return invoke<ContractPreference[]>("list_contract_preferences");
+}
+
+/** 删除一条起草偏好。 */
+export function deleteContractPreference(id: string): Promise<number> {
+  return invoke<number>("delete_contract_preference", { id });
 }

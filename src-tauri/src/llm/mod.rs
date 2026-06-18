@@ -251,6 +251,9 @@ pub fn compat_chat_url(endpoint: &str) -> String {
     }
     if e.ends_with("/chat/completions") {
         e.to_string()
+    } else if e.ends_with("/v1") || e.ends_with("/v4") {
+        // 用户填到了版本段(如智谱 `/api/paas/v4`)→ 只补 `/chat/completions`,别再塞 `/v1`
+        format!("{}/chat/completions", e)
     } else {
         format!("{}/v1/chat/completions", e)
     }
@@ -308,12 +311,10 @@ impl LlmConfig {
             if settings.cloud_llm_is_compat() {
                 let preset =
                     crate::llm::providers::compat_preset(settings.effective_cloud_llm_backend());
+                // 走 effective_*(当前后端专属字段优先、旧 compat_llm_* 兜底),
+                // 否则 GLM/MiMo/自定义的独立配置在运行时不生效(整合 PR#15 时漏接的 P0)。
                 let raw_endpoint = settings
-                    .compat_llm_endpoint
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
+                    .effective_compat_llm_endpoint()
                     .or_else(|| {
                         preset
                             .map(|p| p.default_endpoint.to_string())
@@ -322,18 +323,14 @@ impl LlmConfig {
                     .unwrap_or_default();
                 let endpoint = compat_chat_url(&raw_endpoint);
                 let model = settings
-                    .compat_llm_model
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
+                    .effective_compat_llm_model()
                     .or_else(|| preset.map(|p| p.default_model.to_string()))
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "gpt-3.5-turbo".to_string());
                 return Self {
                     endpoint,
                     model,
-                    api_key: settings.compat_llm_api_key.clone(),
+                    api_key: settings.effective_compat_llm_api_key(),
                     timeout_secs: 90,
                     temperature: 0.3, // 兼容档可能是推理型,0.0 易死循环 → 同 MiniMax 取 0.3
                 };

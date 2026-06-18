@@ -110,12 +110,14 @@ pub struct Settings {
     pub minimax_verified_at: Option<String>,
 
     /// 2026-06-16:通用 OpenAI 兼容云端 LLM 后端(智谱 GLM / 小米 MiMo / 自定义)。
-    /// `cloud_llm_backend` 取 `"glm"` / `"mimo"` / `"custom"` 时改读下面这组 `compat_llm_*`。
+    /// `cloud_llm_backend` 取 `"glm"` / `"mimo"` / `"custom"` 时读对应服务商的独立配置。
     /// **纯增量调和**:DeepSeek(`cloud_llm_*`+档位)/ MiniMax(`minimax_*`+v2 协议)两条老路完全不动;
     /// 这条走标准 `/v1/chat/completions`,模型名是用户**显式填的具体型号**(不套 DeepSeek 的 flash/pro 档位,
-    /// 同 MiniMax 处理)。glm/mimo/custom 共用这一组字段(同一时刻只激活一个后端)——
-    /// 切换具体服务商时前端会重填 endpoint/model 并清空 key+verified(各家 key 不通用)。
+    /// 同 MiniMax 处理)。glm/mimo/custom 的 key/endpoint/model 分开保存,切换服务商不会互相覆盖。
     /// 预设默认值见 `llm::providers`。
+    ///
+    /// 旧版 `compat_llm_*` 作为兼容字段保留:读当前后端时,如果新字段为空,会 fallback 到旧字段,
+    /// 这样用户已经填过的配置不会因升级丢失。
     pub compat_llm_endpoint: Option<String>,
     /// 通用兼容后端模型名(具体型号,如 `glm-4.6`;自由文本,以服务商控制台为准)。
     pub compat_llm_model: Option<String>,
@@ -123,6 +125,24 @@ pub struct Settings {
     pub compat_llm_api_key: Option<String>,
     /// 通用兼容后端 key 验证通过时间(坑#11)。
     pub compat_llm_verified_at: Option<String>,
+
+    /// 智谱 GLM 独立配置(OpenAI-compatible chat completions)。
+    pub glm_llm_endpoint: Option<String>,
+    pub glm_llm_model: Option<String>,
+    pub glm_llm_api_key: Option<String>,
+    pub glm_llm_verified_at: Option<String>,
+
+    /// 小米 MiMo 独立配置(OpenAI-compatible chat completions)。
+    pub mimo_llm_endpoint: Option<String>,
+    pub mimo_llm_model: Option<String>,
+    pub mimo_llm_api_key: Option<String>,
+    pub mimo_llm_verified_at: Option<String>,
+
+    /// 自定义 OpenAI 兼容模型独立配置。
+    pub custom_llm_endpoint: Option<String>,
+    pub custom_llm_model: Option<String>,
+    pub custom_llm_api_key: Option<String>,
+    pub custom_llm_verified_at: Option<String>,
 
     /// 2026-05-24 k:元典法律开放平台 API key — 执行案件查被执行人 / 失信 / 财产线索 用
     /// 申请:https://open.chineselaw.com/
@@ -266,6 +286,112 @@ impl Settings {
         )
     }
 
+    fn clean_string(value: &Option<String>) -> Option<String> {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// 当前兼容后端的 endpoint。新字段优先,旧版 compat_llm_* 兜底。
+    pub fn effective_compat_llm_endpoint(&self) -> Option<String> {
+        let current = match self.effective_cloud_llm_backend() {
+            "glm" => Self::clean_string(&self.glm_llm_endpoint),
+            "mimo" => Self::clean_string(&self.mimo_llm_endpoint),
+            "custom" => Self::clean_string(&self.custom_llm_endpoint),
+            _ => None,
+        };
+        current.or_else(|| Self::clean_string(&self.compat_llm_endpoint))
+    }
+
+    /// 当前兼容后端的模型名。新字段优先,旧版 compat_llm_* 兜底。
+    pub fn effective_compat_llm_model(&self) -> Option<String> {
+        let current = match self.effective_cloud_llm_backend() {
+            "glm" => Self::clean_string(&self.glm_llm_model),
+            "mimo" => Self::clean_string(&self.mimo_llm_model),
+            "custom" => Self::clean_string(&self.custom_llm_model),
+            _ => None,
+        };
+        current.or_else(|| Self::clean_string(&self.compat_llm_model))
+    }
+
+    /// 当前兼容后端的 API key。新字段优先,旧版 compat_llm_* 兜底。
+    pub fn effective_compat_llm_api_key(&self) -> Option<String> {
+        let current = match self.effective_cloud_llm_backend() {
+            "glm" => Self::clean_string(&self.glm_llm_api_key),
+            "mimo" => Self::clean_string(&self.mimo_llm_api_key),
+            "custom" => Self::clean_string(&self.custom_llm_api_key),
+            _ => None,
+        };
+        current.or_else(|| Self::clean_string(&self.compat_llm_api_key))
+    }
+
+    /// 一次性迁移:把旧的「共享 `compat_llm_*`」搬进**当前兼容后端**的专属字段,然后清空旧字段。
+    ///
+    /// 背景:旧设计 glm/mimo/custom 共用一组 `compat_llm_*`(切兼容后端会清空旧 key),所以旧值
+    /// 总归属「当前激活的那个兼容后端」。整合 PR#15 后改成各家独立字段 + 旧字段兜底,但「兜底」会让
+    /// 旧值跨后端串味(切到没填 key 的 MiMo 时会回落到上一个后端的旧 key/endpoint,verified 也错挂)。
+    /// 迁移一次把旧值归位到专属字段并清空旧字段,此后 `effective_*` 的兜底恒为 no-op,串味消失。
+    ///
+    /// 幂等:旧字段已空 / 当前非兼容后端 → 不动,返回 `false`。返回 `true` 表示有改动需回写。
+    pub fn migrate_legacy_compat_inplace(&mut self) -> bool {
+        let le = Self::clean_string(&self.compat_llm_endpoint);
+        let lm = Self::clean_string(&self.compat_llm_model);
+        let lk = Self::clean_string(&self.compat_llm_api_key);
+        let lv = Self::clean_string(&self.compat_llm_verified_at);
+        if le.is_none() && lm.is_none() && lk.is_none() && lv.is_none() {
+            return false; // 旧字段已空,迁移过了 / 从没用过
+        }
+        // 只在当前是兼容后端时迁移(旧值归属当前兼容后端);非兼容后端时旧值归属未知,
+        // 留着不动也无害(deepseek/minimax 路径不读 compat_llm_*,不会串味)。
+        let backend = self.effective_cloud_llm_backend().to_string();
+        let (ep, md, key, ver) = match backend.as_str() {
+            "glm" => (
+                &mut self.glm_llm_endpoint,
+                &mut self.glm_llm_model,
+                &mut self.glm_llm_api_key,
+                &mut self.glm_llm_verified_at,
+            ),
+            "mimo" => (
+                &mut self.mimo_llm_endpoint,
+                &mut self.mimo_llm_model,
+                &mut self.mimo_llm_api_key,
+                &mut self.mimo_llm_verified_at,
+            ),
+            "custom" => (
+                &mut self.custom_llm_endpoint,
+                &mut self.custom_llm_model,
+                &mut self.custom_llm_api_key,
+                &mut self.custom_llm_verified_at,
+            ),
+            _ => return false,
+        };
+        // 只填专属字段里为空的(已填的用户值优先,不覆盖)
+        let fill = |dst: &mut Option<String>, src: Option<String>| {
+            let dst_empty = dst
+                .as_deref()
+                .map(str::trim)
+                .map(|x| x.is_empty())
+                .unwrap_or(true);
+            if dst_empty {
+                if let Some(v) = src {
+                    *dst = Some(v);
+                }
+            }
+        };
+        fill(ep, le);
+        fill(md, lm);
+        fill(key, lk);
+        fill(ver, lv);
+        // 清空旧共享字段:此后只认专属字段,杜绝跨后端串味
+        self.compat_llm_endpoint = None;
+        self.compat_llm_model = None;
+        self.compat_llm_api_key = None;
+        self.compat_llm_verified_at = None;
+        true
+    }
+
     /// 云端 OCR 主力(2026-06-12)。`"paddle-vl"` 仅当用户显式选择**且** key 已填才生效,
     /// 否则一律 `"mineru"`(老用户 / key 被清掉后零感知回到原行为)。
     pub fn effective_ocr_cloud_primary(&self) -> &str {
@@ -352,7 +478,14 @@ pub fn read_settings() -> Result<Settings, String> {
     if text.trim().is_empty() {
         return Ok(Settings::default());
     }
-    serde_json::from_str::<Settings>(&text).map_err(|e| format!("settings.json 格式错误: {}", e))
+    let mut settings = serde_json::from_str::<Settings>(&text)
+        .map_err(|e| format!("settings.json 格式错误: {}", e))?;
+    // 一次性把旧共享 compat_llm_* 归位到当前兼容后端的专属字段(幂等;迁移过/没用过都是 no-op)。
+    // 回写失败不致命:下次读再迁一次(in-memory 已是迁移后的值,本次调用方拿到的就是对的)。
+    if settings.migrate_legacy_compat_inplace() {
+        let _ = write_settings(&settings);
+    }
+    Ok(settings)
 }
 
 /// 写入设置(覆盖)。会自动创建父目录。

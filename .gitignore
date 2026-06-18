@@ -34,6 +34,10 @@ data/
 # Superpowers scratch
 .superpowers/
 
+# Python bytecode (court_filing_cli 等内置 Python 模块)
+__pycache__/
+*.pyc
+
 # Legacy archive's nested build artifacts
 _legacy_codex/backend/.venv/
 _legacy_codex/backend/.pytest_cache/

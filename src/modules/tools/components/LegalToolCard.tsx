@@ -11,18 +11,38 @@ interface Props {
   title: string;
   desc: string;
   onClick: () => void;
-  /** 可选状态标签(如 "重写中" / "Beta" / "新") */
+  /** 可选状态标签(如 "重写中" / "Beta" / "新" / "即将上线") */
   badge?: string;
+  /** 置灰、不可点(用于「即将上线」占位卡) */
+  disabled?: boolean;
 }
 
-export function LegalToolCard({ icon: Icon, title, desc, onClick, badge }: Props) {
+export function LegalToolCard({
+  icon: Icon,
+  title,
+  desc,
+  onClick,
+  badge,
+  disabled,
+}: Props) {
   return (
     <button
       type="button"
-      onClick={onClick}
-      className="group flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left transition-all hover:border-foreground/30 hover:bg-card/80 hover:shadow-sm"
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      className={`group flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left transition-all ${
+        disabled
+          ? "cursor-not-allowed opacity-50"
+          : "hover:border-foreground/30 hover:bg-card/80 hover:shadow-sm"
+      }`}
     >
-      <Icon className="mt-0.5 size-5 shrink-0 text-foreground/70 transition-colors group-hover:text-foreground" />
+      <Icon
+        className={`mt-0.5 size-5 shrink-0 transition-colors ${
+          disabled
+            ? "text-foreground/40"
+            : "text-foreground/70 group-hover:text-foreground"
+        }`}
+      />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
           <h3 className="text-sm font-medium text-foreground">{title}</h3>

@@ -1,5 +1,7 @@
 pub mod chat;
+pub mod contract_draft;
 pub mod contract_review;
+pub mod court_filing_env;
 pub mod court_sms;
 pub mod db;
 pub mod deepseek;
@@ -2265,10 +2267,8 @@ async fn start_court_filing(
         .clone()
         .ok_or_else(|| "未配置一张网密码（法律工具→辅助在线立案）".to_string())?;
     let cli_path = resolve_court_filing_cli_path(&app, settings.court_filing_cli_path.clone());
-    let python = settings
-        .court_filing_python
-        .clone()
-        .unwrap_or_else(|| "python3".to_string());
+    // 解释器:用户配置 > 我们装的 venv > 平台默认(口径与环境检测/安装一致)。
+    let python = court_filing_env::resolve_python(settings.court_filing_python.as_deref());
     let cookie_dir = settings.court_filing_cookie_dir.clone();
 
     // 5. 组装 case_data.json
@@ -3092,6 +3092,36 @@ async fn get_court_filing_job(
     db::court_filing::get(pool.inner(), &id)
         .await
         .map_err(db_err)
+}
+
+/// 检测在线立案运行环境(Python + playwright/ddddocr/httpx + Chromium + CLI 模块)。
+#[tauri::command]
+async fn court_filing_env_check(
+    app: tauri::AppHandle,
+) -> Result<court_filing_env::EnvReport, String> {
+    let settings = settings::read_settings().unwrap_or_default();
+    let python = court_filing_env::resolve_python(settings.court_filing_python.as_deref());
+    let cli_path = resolve_court_filing_cli_path(&app, settings.court_filing_cli_path.clone());
+    let cli_parent = std::path::Path::new(&cli_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from(&cli_path));
+    Ok(court_filing_env::run_check(&python, &cli_parent).await)
+}
+
+/// 一键安装在线立案运行环境(建 venv + 装依赖 + 下 Chromium,流式进度走
+/// `court-filing-env-progress` 事件)。
+#[tauri::command]
+async fn court_filing_env_install(
+    app: tauri::AppHandle,
+) -> Result<court_filing_env::EnvReport, String> {
+    let settings = settings::read_settings().unwrap_or_default();
+    let cli_path = resolve_court_filing_cli_path(&app, settings.court_filing_cli_path.clone());
+    let cli_parent = std::path::Path::new(&cli_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from(&cli_path));
+    court_filing_env::run_install(&app, &cli_parent, settings.court_filing_python.clone()).await
 }
 
 /// 列出全部律师档案。
@@ -5087,6 +5117,8 @@ pub fn run() {
             submit_captcha_answer,
             list_court_filing_jobs,
             get_court_filing_job,
+            court_filing_env_check,
+            court_filing_env_install,
             list_lawyer_profiles,
             save_lawyer_profile,
             update_lawyer_profile,
@@ -5133,6 +5165,19 @@ pub fn run() {
             contract_review::convert_doc_to_docx,
             contract_review::export_contract_opinion_docx,
             contract_review::export_contract_redline_docx,
+            contract_draft::plan_contract_draft,
+            contract_draft::generate_contract_draft,
+            contract_draft::export_contract_draft_docx,
+            contract_draft::revise_contract_draft,
+            contract_draft::save_contract_draft,
+            contract_draft::list_contract_drafts,
+            contract_draft::list_contract_draft_versions,
+            contract_draft::add_contract_draft_version,
+            contract_draft::mark_contract_draft_final,
+            contract_draft::delete_contract_draft,
+            contract_draft::add_contract_preference,
+            contract_draft::list_contract_preferences,
+            contract_draft::delete_contract_preference,
             save_editor_doc,
             case_chat,
             list_chat_history,

@@ -21,9 +21,11 @@ import { useEffect, useState } from "react";
 import type { InterestPrefill } from "./calculators/InterestCalculator";
 import {
   ArrowLeft,
+  Briefcase,
   Calculator,
   Calendar,
   CalendarClock,
+  Car,
   Combine,
   Gavel,
   Hash,
@@ -36,9 +38,11 @@ import {
 
 import { DateCalculator } from "./calculators/DateCalculator";
 import { InterestCalculator } from "./calculators/InterestCalculator";
+import { LaborSeveranceCalculator } from "./calculators/LaborSeveranceCalculator";
 import { LawyerFeeCalculator } from "./calculators/LawyerFeeCalculator";
 import { LitigationFeeCalculator } from "./calculators/LitigationFeeCalculator";
 import { NumberConverter } from "./calculators/NumberConverter";
+import { TrafficAccidentCompensationCalculator } from "./calculators/TrafficAccidentCompensationCalculator";
 import { KbShareTool } from "./KbShareTool";
 import { CaseBundleTool } from "./CaseBundleTool";
 import { CourtSmsTool } from "./CourtSmsTool";
@@ -54,6 +58,8 @@ type LegalToolId =
   | "fee"
   | "legalfee"
   | "interest"
+  | "traffic"
+  | "labor"
   | "kbshare"
   | "casebundle"
   | "courtsms"
@@ -100,22 +106,37 @@ const LEGAL_TOOLS: LegalTool[] = [
     desc: "借款利息(LPR 历史)+ 执行款(多案 / 还款抵扣 / 五阶段清偿 / 迟延履行利息)",
     icon: TrendingUp,
   },
+  {
+    id: "traffic",
+    title: "交通事故赔偿计算器",
+    desc: "残疾/死亡赔偿金、被扶养人生活费、各项费用 + 责任比例 + 交强险扣减,带法律依据",
+    icon: Car,
+  },
+  {
+    id: "labor",
+    title: "劳动解除赔偿计算器",
+    desc: "经济补偿 N / 代通知金 N+1 / 违法解除 2N + 3 倍社平封顶 + 未休年假,带法律依据",
+    icon: Briefcase,
+  },
 ];
 
 export function ToolsModule({
   initialTool,
   interestPrefill,
+  routeNonce,
 }: {
   /** 2026-05-25:从执行模块「→ 算剩余执行款」跳过来时,自动打开对应工具 */
   initialTool?: LegalToolId | null;
   /** 给 InterestCalculator 的预填(本金 / 起算日 / 备注)*/
   interestPrefill?: InterestPrefill | null;
+  /** 自增 nonce:即使 initialTool 不变也强制重新打开(重复跳转用) */
+  routeNonce?: number;
 }) {
   const [activeTool, setActiveTool] = useState<LegalToolId | null>(initialTool ?? null);
-  // 父组件切换 initialTool 时同步
+  // 父组件切换 initialTool(或 routeNonce)时同步
   useEffect(() => {
     if (initialTool) setActiveTool(initialTool);
-  }, [initialTool]);
+  }, [initialTool, routeNonce]);
   const tool = activeTool
     ? LEGAL_TOOLS.find((t) => t.id === activeTool) ?? null
     : null;
@@ -318,6 +339,8 @@ export function ToolsModule({
             {tool.id === "daycal" && <DateCalculator />}
             {tool.id === "fee" && <LawyerFeeCalculator />}
             {tool.id === "legalfee" && <LitigationFeeCalculator />}
+            {tool.id === "traffic" && <TrafficAccidentCompensationCalculator />}
+            {tool.id === "labor" && <LaborSeveranceCalculator />}
             {tool.id === "interest" && (
               // key:prefill 变了强制重挂(state 是惰性初始化,不重挂的话
               // "先开过计算器再从执行页跳来"的场景预填不生效)

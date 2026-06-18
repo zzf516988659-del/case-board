@@ -81,9 +81,11 @@ function App() {
   const [reportLoading, setReportLoading] = useState(false);
   /** 2026-05-25 · 工具模块预填(从执行案件「算执行款」跳过来时带数据:本金/起算日/还款记录)*/
   const [toolsRoute, setToolsRoute] = useState<{
-    tool: "interest" | null;
+    tool: "interest" | "courtfiling" | null;
     interestPrefill: InterestPrefill | null;
-  }>({ tool: null, interestPrefill: null });
+    /** 自增 nonce:即使 tool 不变也强制 ToolsModule 重新打开(用于「重复跳转」) */
+    nonce: number;
+  }>({ tool: null, interestPrefill: null, nonce: 0 });
   /**
    * 2026-05-25 V0.1.8 · 设置 page 是否有未保存改动(从 SettingsModal page 模式上报)。
    * 切别的 tab 时会先 confirm,避免静默丢修改。
@@ -249,6 +251,17 @@ function App() {
     [setActiveModuleSafe],
   );
 
+  // 案件详情页「开始立案」检测到环境没装好时,会派发此事件 → 跳到法律工具的
+  // 「辅助在线立案」标签页(那里能一键装环境)。用全局事件避免深层 prop 钻透。
+  useEffect(() => {
+    const handler = () => {
+      setToolsRoute((r) => ({ tool: "courtfiling", interestPrefill: null, nonce: r.nonce + 1 }));
+      void setActiveModuleSafe("tools");
+    };
+    window.addEventListener("caseboard:open-filing-env", handler);
+    return () => window.removeEventListener("caseboard:open-filing-env", handler);
+  }, [setActiveModuleSafe]);
+
   // onboarding / settings 修改完后,刷新 userDisplayName + DeepSeek chip 判断。
   // 2026-05-27 跟启动逻辑对齐:只要填了 key 就显示 chip(详见上面 useEffect 注释)。
   // 之前这里还在用 isCloud 严格判断,导致同事 onboarding 选 local + 设置里补填 cloud key
@@ -399,15 +412,31 @@ function App() {
       const backend = s.cloud_llm_backend ?? "deepseek";
       const isMinimax = backend === "minimax";
       const isCompat = ["glm", "mimo", "custom"].includes(backend);
+      const compatKey =
+        backend === "glm"
+          ? s.glm_llm_api_key || s.compat_llm_api_key
+          : backend === "mimo"
+            ? s.mimo_llm_api_key || s.compat_llm_api_key
+            : backend === "custom"
+              ? s.custom_llm_api_key || s.compat_llm_api_key
+              : s.compat_llm_api_key;
+      const compatVerifiedAt =
+        backend === "glm"
+          ? s.glm_llm_verified_at || s.compat_llm_verified_at
+          : backend === "mimo"
+            ? s.mimo_llm_verified_at || s.compat_llm_verified_at
+            : backend === "custom"
+              ? s.custom_llm_verified_at || s.compat_llm_verified_at
+              : s.compat_llm_verified_at;
       const filled = isMinimax
         ? !!s.minimax_api_key?.trim()
         : isCompat
-          ? !!s.compat_llm_api_key?.trim()
+          ? !!compatKey?.trim()
           : !!s.cloud_llm_api_key?.trim();
       const verified = isMinimax
         ? !!s.minimax_verified_at
         : isCompat
-          ? !!s.compat_llm_verified_at
+          ? !!compatVerifiedAt
           : !!s.deepseek_verified_at;
       const providerName = isMinimax
         ? "MiniMax"
@@ -1038,7 +1067,7 @@ function App() {
         {activeModule === "execution" && (
           <ExecutionModule
             onCalculateInterest={(prefill) => {
-              setToolsRoute({ tool: "interest", interestPrefill: prefill });
+              setToolsRoute((r) => ({ tool: "interest", interestPrefill: prefill, nonce: r.nonce + 1 }));
               setActiveModuleSafe("tools");
             }}
           />
@@ -1048,6 +1077,7 @@ function App() {
           <ToolsModule
             initialTool={toolsRoute.tool}
             interestPrefill={toolsRoute.interestPrefill}
+            routeNonce={toolsRoute.nonce}
           />
         )}
         {activeModule === "team" && <TeamModule />}

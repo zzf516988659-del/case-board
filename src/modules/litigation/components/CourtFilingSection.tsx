@@ -15,7 +15,9 @@ import {
   submitCaptchaAnswer,
   listLawyerProfiles,
   revealInFinder,
+  courtFilingEnvCheck,
 } from "@/lib/api";
+import { toast } from "@/components/ui/toast";
 import type {
   CourtFilingJob,
   CourtFilingProgress,
@@ -254,6 +256,7 @@ export function CourtFilingSection({ caseData }: { caseData: Case }) {
   const [progressDetail, setProgressDetail] = useState("");
   const [captchaModal, setCaptchaModal] = useState<CourtFilingCaptcha | null>(null);
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+  const [envChecking, setEnvChecking] = useState(false);
 
   async function refresh() {
     try {
@@ -317,6 +320,23 @@ export function CourtFilingSection({ caseData }: { caseData: Case }) {
     if (selectedAgents.length === 0) {
       setProgressMsg("请先选择代理律师（法律工具→辅助在线立案→代理律师档案）");
       return;
+    }
+    // 先检测运行环境(Python + playwright/ddddocr/Chromium);没装好就跳到
+    // 法律工具的「辅助在线立案」标签页一键安装,装完回来再发起。
+    setEnvChecking(true);
+    try {
+      const env = await courtFilingEnvCheck();
+      if (!env.ok) {
+        toast("在线立案运行环境未就绪,已为你跳到安装页", "info");
+        window.dispatchEvent(new CustomEvent("caseboard:open-filing-env"));
+        return;
+      }
+    } catch {
+      toast("无法检测运行环境,请先到「法律工具→辅助在线立案」安装", "info");
+      window.dispatchEvent(new CustomEvent("caseboard:open-filing-env"));
+      return;
+    } finally {
+      setEnvChecking(false);
     }
     setPrepOpen(true);
   }
@@ -427,9 +447,9 @@ export function CourtFilingSection({ caseData }: { caseData: Case }) {
       )}
 
       {/* 开始按钮 */}
-      <Button type="button" size="sm" onClick={handleStart} disabled={running || selectedAgents.length === 0}>
+      <Button type="button" size="sm" onClick={handleStart} disabled={running || envChecking || selectedAgents.length === 0}>
         <Play className="size-4" />
-        {running ? "立案中…" : "开始立案"}
+        {running ? "立案中…" : envChecking ? "检测环境中…" : "开始立案"}
       </Button>
       {materialFolder ? (
         <p className="truncate text-xs text-muted-foreground">本次材料文件夹：{materialFolder}</p>

@@ -8,12 +8,13 @@
  * 律师本人确认后手动提交。目前仅在 macOS 验证过;依赖本机 Python 运行时(不打包进安装包)。
  */
 import { useEffect, useState } from "react";
-import { Loader2, Save, AlertTriangle, Gavel, Terminal } from "lucide-react";
+import { Loader2, Save, AlertTriangle, Gavel } from "lucide-react";
 
 import { getSettings, saveSettings } from "@/lib/api";
 import type { Settings } from "@/lib/types";
 import { toast } from "@/components/ui/toast";
 import { LawyerProfilesCard } from "@/components/LawyerProfilesCard";
+import { CourtFilingEnvPanel } from "./CourtFilingEnvPanel";
 
 export function CourtFilingTool() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -88,23 +89,21 @@ export function CourtFilingTool() {
         </div>
       </div>
 
-      {/* 运行环境准备(Python 运行时不打包,需本机自备) */}
-      <div className="rounded-lg bg-sky-50 px-4 py-3 text-sm text-slate-700">
-        <p className="flex items-center gap-1.5 font-medium text-slate-800">
-          <Terminal className="size-4" /> 运行环境准备(一次性)
-        </p>
-        <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-[13px] leading-relaxed">
-          <li>本机装 <b>Python 3.11+</b>。</li>
-          <li>
-            装依赖:<code className="rounded bg-white px-1">pip install playwright ddddocr httpx</code>,
-            再 <code className="rounded bg-white px-1">playwright install chromium</code>(会下载约 130MB 浏览器内核)。
-          </li>
-          <li>
-            macOS 自动用系统 <code className="rounded bg-white px-1">python3</code>;
-            <b>Windows</b> 在下方「Python 解释器」填 <code className="rounded bg-white px-1">python</code> 或 venv 内全路径。
-          </li>
-          <li>完整步骤 + Windows 已知待修点见项目内 <code className="rounded bg-white px-1">standalone/court_filing_cli/README.md</code>。</li>
-        </ol>
+      {/* 运行环境:体检 + 一键安装(Python 运行时不打包,需本机自备,这里帮你一键装好) */}
+      <div className="rounded-lg bg-sky-50 px-4 py-3">
+        <CourtFilingEnvPanel
+          onReady={() => {
+            // 安装成功后端会把 court_filing_python 写成 venv 路径;同步到本地 state +
+            // 输入框,否则用户之后点「保存配置」会用旧的空值把它覆盖回去。
+            getSettings()
+              .then((s) => {
+                setSettings(s);
+                setPython(s.court_filing_python ?? "");
+                setDirty(false);
+              })
+              .catch(() => {});
+          }}
+        />
       </div>
 
       {/* 立案配置 */}
