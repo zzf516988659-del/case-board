@@ -17,6 +17,7 @@ use directories::ProjectDirs;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
+pub mod bookmarks;
 pub mod calendar_events;
 pub mod case_instances;
 pub mod cases;

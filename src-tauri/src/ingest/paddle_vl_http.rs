@@ -223,5 +223,18 @@ fn markdown_from_jsonl(jsonl: &str) -> Result<String, String> {
     if pages.is_empty() {
         return Err("结果 JSONL 里没有 layoutParsingResults.markdown(可能返回结构变了)".into());
     }
-    Ok(pages.join("\n\n"))
+    // 每页前插页码标记(对齐本机 vision 的 `--- 第 N 页 ---`),给「搜索定位到页」用。
+    // 单页不插(免干扰);多页才插。
+    if pages.len() <= 1 {
+        return Ok(pages.join("\n\n"));
+    }
+    let mut out = String::new();
+    for (i, p) in pages.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!("--- 第 {} 页 ---\n\n", i + 1));
+        out.push_str(p);
+    }
+    Ok(out)
 }

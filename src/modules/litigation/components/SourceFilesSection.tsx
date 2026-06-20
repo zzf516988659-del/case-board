@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   CheckCircle2,
@@ -11,6 +11,7 @@ import {
   FolderSearch,
   Image as ImageIcon,
   Loader2,
+  Pencil,
   RefreshCw,
   Sparkles,
   Trash2,
@@ -18,7 +19,7 @@ import {
 
 import { type Document, STAGE_ORDER } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
-import { cn } from "@/lib/utils";
+import { cn, docDisplayName } from "@/lib/utils";
 
 import { type GroupKey } from "../lib/groupByStage";
 import {
@@ -49,6 +50,8 @@ export interface MarkHandlers {
   onMarkPartySide: (docIds: string[], value: string, enabled: boolean) => void;
   /** 分类(单值,单文档;null=清空) */
   onMarkCategory: (docId: string, value: string | null) => void;
+  /** 重命名(板内显示名,单文档;name=null/空=清回原文件名) */
+  onRename: (docId: string, name: string | null) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -65,6 +68,7 @@ export function SourceFilesSection({
   onMarkImportance,
   onMarkPartySide,
   onMarkCategory,
+  onRename,
   onAiOrganize,
   organizing,
   onOpenDoc,
@@ -89,6 +93,8 @@ export function SourceFilesSection({
   onMarkImportance: (docIds: string[], value: Importance | null) => void;
   onMarkPartySide: (docIds: string[], value: string, enabled: boolean) => void;
   onMarkCategory: (docId: string, value: string | null) => void;
+  /** 重命名板内显示名(单文档;null/空=清回原文件名) */
+  onRename: (docId: string, name: string | null) => void;
   /** 🪄 AI 自动整理(整案分类) */
   onAiOrganize: () => void;
   organizing: boolean;
@@ -125,6 +131,7 @@ export function SourceFilesSection({
     onMarkImportance,
     onMarkPartySide,
     onMarkCategory,
+    onRename,
   };
 
   return (
@@ -511,16 +518,21 @@ function FolderTreeView({
     label: string;
     docIds: string[];
     mark?: DocMark;
+    /** 单文件时带上文档,供「重命名」用(文件夹批量不带) */
+    doc?: Document;
   } | null>(null);
+  // 重命名弹窗(单文件)
+  const [renaming, setRenaming] = useState<Document | null>(null);
   const openMenuFor = (
     e: React.MouseEvent,
     label: string,
     docIds: string[],
     mark?: DocMark,
+    doc?: Document,
   ) => {
     e.preventDefault();
     if (docIds.length === 0) return;
-    setMenu({ x: e.clientX, y: e.clientY, label, docIds, mark });
+    setMenu({ x: e.clientX, y: e.clientY, label, docIds, mark, doc });
   };
 
   // 沿 path 解析当前节点 + 面包屑(路径失效则回退到能走到的最深处)
@@ -642,7 +654,9 @@ function FolderTreeView({
                 doc={doc}
                 mark={m}
                 onOpen={() => onOpenDoc(doc)}
-                onContextMenu={(e) => openMenuFor(e, doc.filename, [doc.id], m)}
+                onContextMenu={(e) =>
+                  openMenuFor(e, docDisplayName(doc), [doc.id], m, doc)
+                }
               />
             );
           })}
@@ -662,7 +676,16 @@ function FolderTreeView({
               ? (v) => marks.onMarkCategory(menu.docIds[0], v)
               : undefined
           }
+          onRename={menu.doc ? () => setRenaming(menu.doc!) : undefined}
           onClose={() => setMenu(null)}
+        />
+      )}
+
+      {renaming && (
+        <RenameDialog
+          doc={renaming}
+          onSubmit={(name) => marks.onRename(renaming.id, name)}
+          onClose={() => setRenaming(null)}
         />
       )}
     </div>
@@ -714,15 +737,22 @@ function FileTile({
   const status = doc.extraction_status;
   const ignored = mark.importance === "忽略";
   const important = mark.importance === "重要";
+  const renamed = !!doc.display_name?.trim();
   // 有任一轴是 AI 建议(未被人工确认)→ 角标提示,引导右键确认/修改
   const aiSuggested =
-    mark.importanceSource === "ai_suggest" || mark.categorySource === "ai_suggest";
+    mark.importanceSource === "ai_suggest" ||
+    mark.categorySource === "ai_suggest" ||
+    doc.display_name_source === "ai_suggest";
   return (
     <button
       type="button"
       onClick={onOpen}
       onContextMenu={onContextMenu}
-      title={`${doc.filename}(右键标记)`}
+      title={
+        renamed
+          ? `${docDisplayName(doc)}\n原文件名:${doc.filename}(右键可重命名/标记)`
+          : `${doc.filename}(右键可重命名/标记)`
+      }
       className={cn(
         "group relative flex aspect-square flex-col items-center justify-center gap-1.5 rounded-xl border p-2 text-center transition",
         important
@@ -757,7 +787,9 @@ function FileTile({
         </span>
       )}
       <Icon className="size-10 text-muted-foreground group-hover:text-foreground" />
-      <span className="line-clamp-2 break-all text-xs text-foreground">{doc.filename}</span>
+      <span className="line-clamp-2 break-all text-xs text-foreground">
+        {docDisplayName(doc)}
+      </span>
       {/* 底部:当事人侧角标 */}
       {mark.parties.length > 0 && (
         <span className="text-[10px] text-sky-600">{mark.parties.join("·")}</span>
@@ -809,13 +841,16 @@ function DocRow({
           )}
         />
         <div className="min-w-0 flex-1">
-          <p className="truncate font-medium text-foreground">
+          <p
+            className="truncate font-medium text-foreground"
+            title={doc.display_name?.trim() ? `原文件名:${doc.filename}` : undefined}
+          >
             {mark?.importance === "重要" && (
               <span className="mr-1 text-amber-500" title="重要">
                 ★
               </span>
             )}
-            {doc.filename}
+            {docDisplayName(doc)}
           </p>
           {doc.category && (
             <p className="mt-0.5 text-xs text-muted-foreground">{doc.category}</p>
@@ -897,9 +932,10 @@ function OrganizeView({
     x: number;
     y: number;
     label: string;
-    docId: string;
+    doc: Document;
     mark: DocMark;
   } | null>(null);
+  const [renaming, setRenaming] = useState<Document | null>(null);
 
   // 按分类分组(未分类垫底)
   const groups = useMemo(() => {
@@ -981,8 +1017,8 @@ function OrganizeView({
                           setMenu({
                             x: e.clientX,
                             y: e.clientY,
-                            label: doc.filename,
-                            docId: doc.id,
+                            label: docDisplayName(doc),
+                            doc,
                             mark: m,
                           });
                         }}
@@ -1002,10 +1038,19 @@ function OrganizeView({
           y={menu.y}
           label={menu.label}
           mark={menu.mark}
-          onImportance={(v) => marks.onMarkImportance([menu.docId], v)}
-          onParty={(v, en) => marks.onMarkPartySide([menu.docId], v, en)}
-          onCategory={(v) => marks.onMarkCategory(menu.docId, v)}
+          onImportance={(v) => marks.onMarkImportance([menu.doc.id], v)}
+          onParty={(v, en) => marks.onMarkPartySide([menu.doc.id], v, en)}
+          onCategory={(v) => marks.onMarkCategory(menu.doc.id, v)}
+          onRename={() => setRenaming(menu.doc)}
           onClose={() => setMenu(null)}
+        />
+      )}
+
+      {renaming && (
+        <RenameDialog
+          doc={renaming}
+          onSubmit={(name) => marks.onRename(renaming.id, name)}
+          onClose={() => setRenaming(null)}
         />
       )}
     </div>
@@ -1021,6 +1066,7 @@ function MarkContextMenu({
   onImportance,
   onParty,
   onCategory,
+  onRename,
   onClose,
 }: {
   x: number;
@@ -1032,6 +1078,8 @@ function MarkContextMenu({
   onParty: (v: string, enabled: boolean) => void;
   /** 仅单文件提供 → 显示「归类」分区(批量不支持改分类) */
   onCategory?: (v: string | null) => void;
+  /** 仅单文件提供 → 显示「重命名」(打开重命名弹窗) */
+  onRename?: () => void;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -1070,6 +1118,22 @@ function MarkContextMenu({
       <div className="truncate px-2 py-1 text-[11px] text-muted-foreground" title={label}>
         {label}
       </div>
+      {onRename && (
+        <>
+          <button
+            type="button"
+            className={item}
+            onClick={() => {
+              onRename();
+              onClose();
+            }}
+          >
+            <Pencil className="size-3 text-sky-600" />
+            重命名
+          </button>
+          <div className="my-1 border-t border-border" />
+        </>
+      )}
       <button
         type="button"
         className={item}
@@ -1134,6 +1198,109 @@ function MarkContextMenu({
           })}
         </>
       )}
+    </div>,
+    document.body,
+  );
+}
+
+/**
+ * 重命名弹窗:给文档起一个干净的板内显示名(纯元数据,**不动磁盘原件**)。
+ * 预填当前显示名;Enter 提交,Esc / 点遮罩取消;「恢复原文件名」清回原始 filename。
+ */
+function RenameDialog({
+  doc,
+  onSubmit,
+  onClose,
+}: {
+  doc: Document;
+  onSubmit: (name: string | null) => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(docDisplayName(doc));
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const submit = () => {
+    const trimmed = value.trim();
+    onSubmit(trimmed.length > 0 ? trimmed : null); // 空 → 清回原文件名
+    onClose();
+  };
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-foreground">
+          <Pencil className="size-4 text-sky-600" />
+          重命名(板内显示名)
+        </h3>
+        <p className="mb-3 text-[11px] text-muted-foreground">
+          只改看板里的显示名,<b className="text-foreground">不动磁盘上的原文件</b>
+          。建议带类型前缀,如「证据-微信聊天记录」。
+        </p>
+        <input
+          ref={inputRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-sky-400"
+          placeholder="如:证据-XX买卖合同"
+        />
+        <p className="mt-2 truncate text-[11px] text-muted-foreground" title={doc.filename}>
+          原文件名:{doc.filename}
+        </p>
+        <div className="mt-4 flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              onSubmit(null);
+              onClose();
+            }}
+            className="rounded-lg px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            恢复原文件名
+          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={submit}
+              className="rounded-lg bg-sky-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-600"
+            >
+              确定
+            </button>
+          </div>
+        </div>
+      </div>
     </div>,
     document.body,
   );

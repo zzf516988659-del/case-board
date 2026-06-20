@@ -45,6 +45,7 @@ import {
   openInDefaultApp,
   refreshCaseFiles,
   revealInFinder,
+  setDocumentDisplayName,
 } from "@/lib/api";
 import {
   type Case,
@@ -1123,6 +1124,24 @@ function App() {
           doc={viewerDoc}
           caseFolder={selectedCase.source_folder}
           onClose={() => setViewerDoc(null)}
+          onRename={async (docId, name) => {
+            try {
+              await setDocumentDisplayName(docId, name);
+              // 立即更新打开中的查看器标题(reload 拿的是新数组,viewerDoc 仍指旧对象)
+              setViewerDoc((prev) =>
+                prev && prev.id === docId
+                  ? {
+                      ...prev,
+                      display_name: name,
+                      display_name_source: name ? "user" : null,
+                    }
+                  : prev,
+              );
+              await handleReloadCase();
+            } catch (e) {
+              toast(`重命名失败:${e}`, "error");
+            }
+          }}
         />
       )}
       {previewDoc &&

@@ -45,6 +45,11 @@ pub struct Document {
     /// 'ppocrv6' = 用户对带水印的工商调档件点了「去水印重新识别」→ 强制 PP-OCRv6 + 去水印(不回退);
     /// NULL = 常规 OCR 策略。普通「重新识别」会清回 NULL。
     pub ocr_backend_override: Option<String>,
+    /// 2026-06-20 加(migration 0034):板内显示名(干净、带类型前缀的中文名,替代杂乱原文件名)。
+    /// NULL = 回退原始 filename。**纯元数据,不碰磁盘原件**。
+    pub display_name: Option<String>,
+    /// 显示名来源:'user'(人工右键改名,永不被 AI 覆盖)/ 'ai_suggest'(AI 自动整理建议)。
+    pub display_name_source: Option<String>,
 }
 
 fn make_cache_key(modified_at: Option<&str>, size_bytes: u64) -> String {
@@ -294,6 +299,51 @@ pub async fn set_ocr_backend_override(
         .bind(id)
         .execute(pool)
         .await?;
+    Ok(res.rows_affected())
+}
+
+/// 2026-06-20 · 人工设置文档板内显示名(右键重命名)。
+/// `name = Some(非空)` → 写显示名 + source='user'(从此 AI 自动整理不再覆盖);
+/// `name = None` 或空白 → 清回原始 filename(display_name 与 source 都置 NULL)。
+/// **纯元数据,不动磁盘原件**。返回受影响行数。
+pub async fn set_display_name(
+    pool: &SqlitePool,
+    id: &str,
+    name: Option<&str>,
+) -> Result<u64, sqlx::Error> {
+    let trimmed = name.map(str::trim).filter(|s| !s.is_empty());
+    let res = sqlx::query(
+        "UPDATE documents SET display_name = ?1, \
+         display_name_source = CASE WHEN ?1 IS NULL THEN NULL ELSE 'user' END \
+         WHERE id = ?2 AND deleted_at IS NULL",
+    )
+    .bind(trimmed)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// 2026-06-20 · AI 自动整理写显示名建议:**仅当无人工显示名时**写入(人工永远优先)。
+/// 空名跳过。写入后 source='ai_suggest'。返回受影响行数(被人工占用/空名 → 0)。
+pub async fn set_ai_display_name(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+) -> Result<u64, sqlx::Error> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    let res = sqlx::query(
+        "UPDATE documents SET display_name = ?1, display_name_source = 'ai_suggest' \
+         WHERE id = ?2 AND deleted_at IS NULL \
+         AND (display_name_source IS NULL OR display_name_source = 'ai_suggest')",
+    )
+    .bind(trimmed)
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(res.rows_affected())
 }
 

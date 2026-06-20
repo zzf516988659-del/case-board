@@ -151,9 +151,46 @@ export function setDocumentCategory(
   return invoke("set_document_category", { documentId, value });
 }
 
-/** 🪄 AI 自动整理:一次 LLM 调用判整案材料的 重要度+归类,写 ai_suggest。返回写入数。 */
+/** 🪄 AI 自动整理:一次 LLM 调用判整案材料的 重要度+归类+显示名,写 ai_suggest。返回写入数。 */
 export function aiOrganizeCase(caseId: string): Promise<number> {
   return invoke("ai_organize_case", { caseId });
+}
+
+/** 人工设文档板内显示名(右键重命名);name=null/空 → 清回原文件名。纯元数据,不动原件。 */
+export function setDocumentDisplayName(
+  documentId: string,
+  name: string | null,
+): Promise<void> {
+  return invoke("set_document_display_name", { documentId, name });
+}
+
+/** 在某文档已抽取文本里按页搜索关键词,返回命中页 + 摘要(前端点一下跳页)。 */
+export function searchInDocument(
+  documentId: string,
+  query: string,
+): Promise<import("./types").SearchHit[]> {
+  return invoke("search_in_document", { documentId, query });
+}
+
+/** 列某文档的 PDF 页码书签(按页升序)。 */
+export function listDocumentBookmarks(
+  documentId: string,
+): Promise<import("./types").Bookmark[]> {
+  return invoke("list_document_bookmarks", { documentId });
+}
+
+/** 加一个 PDF 页码书签(page 1-based,label 可空)。返回新书签。 */
+export function addDocumentBookmark(
+  documentId: string,
+  page: number,
+  label: string | null,
+): Promise<import("./types").Bookmark> {
+  return invoke("add_document_bookmark", { documentId, page, label });
+}
+
+/** 删一个 PDF 页码书签。 */
+export function deleteDocumentBookmark(id: string): Promise<void> {
+  return invoke("delete_document_bookmark", { id });
 }
 
 /**
@@ -225,7 +262,7 @@ export function verifyYuandianKey(apiKey: string): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_yuandian_key", { apiKey });
 }
 
-/** 2026-05-25 V0.1.8:检测远程最新版本(lawtools.top 的 version.json)。
+/** 2026-05-25 V0.1.8:检测远程最新版本(lawtools.top 仓库的 version.json)。
  *  失败时 has_update=false + error 字段填上原因,前端可静默忽略。*/
 export function checkForUpdate(): Promise<UpdateInfo> {
   return invoke<UpdateInfo>("check_for_update");

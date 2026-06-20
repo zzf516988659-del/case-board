@@ -1,7 +1,7 @@
 {
   "name": "caseboard",
   "private": true,
-  "version": "0.3.23",
+  "version": "0.3.24",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -28,6 +28,7 @@
     "clsx": "^2.1.1",
     "docx-preview": "^0.3.7",
     "lucide-react": "^1.16.0",
+    "pdfjs-dist": "4.8.69",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",

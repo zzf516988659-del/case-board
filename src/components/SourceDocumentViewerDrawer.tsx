@@ -14,7 +14,19 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { X, Loader2, ExternalLink, FolderOpen, FileText } from "lucide-react";
+import {
+  X,
+  Loader2,
+  ExternalLink,
+  FolderOpen,
+  FileText,
+  Pencil,
+  Check,
+  Search,
+  BookOpen,
+  Bookmark as BookmarkIcon,
+  BookmarkPlus,
+} from "lucide-react";
 
 import {
   allowCaseAssets,
@@ -22,9 +34,15 @@ import {
   openInDefaultApp,
   revealInFinder,
   convertDocToDocx,
+  searchInDocument,
+  listDocumentBookmarks,
+  addDocumentBookmark,
+  deleteDocumentBookmark,
 } from "@/lib/api";
-import type { Document } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import type { Document, Bookmark, SearchHit } from "@/lib/types";
+import { cn, docDisplayName } from "@/lib/utils";
+
+import { PdfReaderView, type Highlight, type NormRect } from "./PdfReaderView";
 
 type Tab = "md" | "original";
 
@@ -46,11 +64,14 @@ export function SourceDocumentViewerDrawer({
   doc,
   caseFolder,
   onClose,
+  onRename,
 }: {
   doc: Document;
   /** 案件源文件夹(用于 asset scope 授权) */
   caseFolder: string;
   onClose: () => void;
+  /** 重命名板内显示名(name=null/空 → 清回原文件名);不传则不显示改名按钮 */
+  onRename?: (docId: string, name: string | null) => void;
 }) {
   const hasMd = doc.extraction_status === "done" && !!doc.extracted_text_path;
   const nativeText = isNativeText(doc.filename);
@@ -60,6 +81,19 @@ export function SourceDocumentViewerDrawer({
 
   // 默认 tab:能看处理后文本→md;否则直接原件
   const [tab, setTab] = useState<Tab>(canShowMd ? "md" : "original");
+
+  // 头部内联重命名(板内显示名,不动磁盘原件)
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const startRename = () => {
+    setNameDraft(docDisplayName(doc));
+    setRenaming(true);
+  };
+  const commitRename = () => {
+    const t = nameDraft.trim();
+    onRename?.(doc.id, t.length > 0 ? t : null);
+    setRenaming(false);
+  };
 
   // Esc 关闭
   useEffect(() => {
@@ -105,17 +139,74 @@ export function SourceDocumentViewerDrawer({
   const assetUrl = assetReady ? convertFileSrc(doc.source_path) : null;
 
   return (
-    <div className="fixed inset-0 z-[110] flex justify-end bg-black/40 backdrop-blur-sm">
-      {/* 点遮罩关闭 */}
-      <div className="flex-1" onClick={onClose} />
-      <div className="flex h-full w-[min(1080px,94vw)] flex-col bg-white shadow-2xl">
+    // 居中模态(2026-06-20:原来贴右抽屉 → 居中,更聚焦)。点遮罩 / Esc 关闭。
+    <div
+      className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm sm:p-8"
+      onClick={onClose}
+    >
+      <div
+        className="flex h-full max-h-[92vh] w-[min(1080px,96vw)] flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* 头:文件名 + tab + 外部操作 */}
         <div className="flex items-center gap-3 border-b border-stone-200 px-5 py-3">
           <FileText className="size-5 shrink-0 text-stone-400" />
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-stone-800">
-              {doc.filename}
-            </p>
+            {renaming ? (
+              <div className="flex items-center gap-1.5">
+                <input
+                  autoFocus
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      commitRename();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setRenaming(false);
+                    }
+                  }}
+                  placeholder="如:证据-XX买卖合同"
+                  className="min-w-0 flex-1 rounded border border-sky-400 px-2 py-1 text-sm text-stone-800 outline-none"
+                />
+                <button
+                  onClick={commitRename}
+                  className="flex items-center gap-1 rounded bg-sky-500 px-2 py-1 text-xs text-white hover:bg-sky-600"
+                  title="保存显示名(Enter)"
+                >
+                  <Check className="size-3.5" />
+                </button>
+                <button
+                  onClick={() => onRename?.(doc.id, null)}
+                  className="shrink-0 rounded px-1.5 py-1 text-xs text-stone-400 hover:bg-stone-100"
+                  title="恢复原文件名"
+                >
+                  恢复原名
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <p className="truncate text-sm font-medium text-stone-800">
+                  {docDisplayName(doc)}
+                </p>
+                {onRename && (
+                  <button
+                    onClick={startRename}
+                    className="shrink-0 rounded p-0.5 text-stone-400 hover:bg-stone-100 hover:text-sky-600"
+                    title="重命名(只改板内显示名,不动原文件)"
+                  >
+                    <Pencil className="size-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+            {!renaming && doc.display_name?.trim() && (
+              <p className="truncate text-[11px] text-stone-400" title={doc.filename}>
+                原文件名:{doc.filename}
+              </p>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <button
@@ -198,6 +289,7 @@ export function SourceDocumentViewerDrawer({
             )
           ) : (
             <OriginalView
+              docId={doc.id}
               filename={doc.filename}
               sourcePath={doc.source_path}
               assetUrl={assetUrl}
@@ -212,12 +304,14 @@ export function SourceDocumentViewerDrawer({
 }
 
 function OriginalView({
+  docId,
   filename,
   sourcePath,
   assetUrl,
   assetError,
   onOpenExternal,
 }: {
+  docId: string;
   filename: string;
   sourcePath: string;
   assetUrl: string | null;
@@ -235,7 +329,14 @@ function OriginalView({
         </div>
       );
     }
-    return <iframe src={assetUrl} title={filename} className="h-full w-full border-0" />;
+      return (
+        <PdfView
+          docId={docId}
+          assetUrl={assetUrl}
+          filename={filename}
+          sourcePath={sourcePath}
+        />
+      );
   }
   // .docx / Excel:JS 库板内渲染(读字节)
   if (isInBoardOffice(filename)) {
@@ -263,6 +364,345 @@ function OriginalView({
         <ExternalLink className="size-4" />
         用系统默认程序打开
       </button>
+    </div>
+  );
+}
+
+/**
+ * PDF 板内渲染(asset 流式协议 + iframe)+ 可选工具条:跳页 / 缩放 / 书签。
+ *
+ * **设计原则(老板 2026-06-20 定):新功能不影响老用法** —— 这些控件只在 PDF 原件页出现,
+ * 不碰 MD tab / 其它文件类型;不用书签/搜索 = 跟原来一样看 PDF。
+ *
+ * 跳页/缩放机制:把 `#page=N&zoom=Z` 追加到 asset URL,并用 `key` 强制 iframe 重挂
+ * (WKWebView 原生 PDF 预览对纯 hash 变化不一定响应,重挂确保以新 fragment 重新加载)。
+ * `#page` 已真机验证可跳;`#zoom` 同机制待验(不生效后续改 pdf.js / CSS)。
+ * 书签:页码级,挂 doc_id(重抽不丢),开庭前标好重要页一点直达;有书签时默认跳到第一个。
+ */
+function PdfView({
+  docId,
+  assetUrl,
+  filename,
+  sourcePath,
+}: {
+  docId: string;
+  assetUrl: string;
+  filename: string;
+  sourcePath: string;
+}) {
+  const [page, setPage] = useState<number | null>(null);
+  const [jumpNonce, setJumpNonce] = useState(0); // 同页重点也能重跳(原生重挂 / 精读重滚)
+  // 渲染模式:native=原生 iframe(默认,大扫描件轻快)/ reader=pdf.js 精读(可缩放/双指/选字)
+  const [mode, setMode] = useState<"native" | "reader">("native");
+  const [draft, setDraft] = useState("");
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  // 精读模式选区高亮(按书签 id 绑定,删书签连带删;存父层 → 切模式不丢)
+  const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [adding, setAdding] = useState(false);
+  const [bmPage, setBmPage] = useState("");
+  const [bmLabel, setBmLabel] = useState("");
+  // 搜索(关键词 → 命中页)
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  // 加载书签;有书签则默认跳到第一个(老板:优先显示书签位置)
+  useEffect(() => {
+    let cancelled = false;
+    listDocumentBookmarks(docId)
+      .then((bm) => {
+        if (cancelled) return;
+        setBookmarks(bm);
+        if (bm.length > 0) setPage((p) => p ?? bm[0].page);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [docId]);
+
+  // 跳页:原生走 `#page=N`(真机验证可跳)+ key 重挂;精读走滚动(PdfReaderView 内处理)。
+  // 缩放归精读模式 —— 原生 PDF 的内容缩放外部控制不了(#zoom 无效、改容器宽只缩放背景)。
+  // 跳页:同页重点也重跳 —— 原生靠 reloadKey 含 nonce 重挂 iframe;精读靠 jumpNonce 重滚。
+  // focusY(PDF point):精读模式跳到页内精确 Y(点带高亮的书签);原生只能到页级。
+  const [focusY, setFocusY] = useState<number | null>(null);
+  const src = page ? `${assetUrl}#page=${page}` : assetUrl;
+  const reloadKey = `${page ?? 0}|${jumpNonce}`;
+
+  const jumpTo = (p: number, y: number | null = null) => {
+    if (p > 0) {
+      setPage(p);
+      setFocusY(y);
+      setJumpNonce((n) => n + 1);
+    }
+  };
+  const jumpToBookmark = (b: Bookmark) => {
+    const h = highlights.find((x) => x.id === b.id);
+    jumpTo(b.page, h?.rects[0]?.y ?? null); // 有高亮 → 精读跳到那段的精确位置
+  };
+  const jumpFromDraft = () => {
+    const n = parseInt(draft, 10);
+    if (Number.isFinite(n)) jumpTo(n);
+  };
+
+  // 加书签:rects 非空(精读模式选区)→ 同时存高亮、按新书签 id 绑定。
+  const addBookmarkDirect = async (p: number, label: string | null, rects?: NormRect[]) => {
+    try {
+      const bm = await addDocumentBookmark(docId, p, label);
+      setBookmarks((prev) =>
+        [...prev, bm].sort((a, b) => a.page - b.page || a.created_at.localeCompare(b.created_at)),
+      );
+      if (rects && rects.length > 0) {
+        setHighlights((prev) => [...prev, { id: bm.id, page: p, rects }]);
+      }
+    } catch {
+      /* 静默:书签失败不影响看 PDF */
+    }
+  };
+  const saveBookmark = async () => {
+    const p = parseInt(bmPage, 10) || page || 1;
+    await addBookmarkDirect(p, bmLabel.trim() || null);
+    setAdding(false);
+    setBmLabel("");
+  };
+
+  const runSearch = async () => {
+    const q = searchQuery.trim();
+    if (!q) return;
+    setSearching(true);
+    try {
+      setSearchHits(await searchInDocument(docId, q));
+    } catch {
+      setSearchHits([]);
+    } finally {
+      setSearching(false);
+    }
+  };
+  const removeBookmark = async (id: string) => {
+    try {
+      await deleteDocumentBookmark(id);
+      setBookmarks((prev) => prev.filter((b) => b.id !== id));
+      setHighlights((prev) => prev.filter((h) => h.id !== id)); // 删书签连带删黄色高亮
+    } catch {
+      /* 静默 */
+    }
+  };
+
+  const tbBtn =
+    "flex items-center gap-1 rounded border border-stone-300 bg-white px-2 py-0.5 text-stone-600 hover:bg-stone-100";
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* 工具条:跳页 + 缩放 + 书签(只在 PDF 出现) */}
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-stone-100 bg-stone-50 px-3 py-1.5 text-xs text-stone-500">
+        {/* 跳页 */}
+        <div className="flex items-center gap-1">
+          <span>跳到第</span>
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ""))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") jumpFromDraft();
+            }}
+            placeholder="页"
+            inputMode="numeric"
+            className="w-12 rounded border border-stone-300 px-1.5 py-0.5 text-center outline-none focus:border-sky-400"
+          />
+          <span>页</span>
+          <button
+            onClick={jumpFromDraft}
+            className="rounded bg-sky-500 px-2 py-0.5 font-medium text-white hover:bg-sky-600"
+          >
+            跳转
+          </button>
+          {page && <span className="text-stone-400">第 {page} 页</span>}
+        </div>
+
+        {/* 搜索:关键词 → 命中页 */}
+        <button
+          onClick={() => setSearchOpen((v) => !v)}
+          className={cn(tbBtn, searchOpen && "border-sky-400 bg-sky-50 text-sky-600")}
+          title="在这份 PDF 里搜关键词、定位到页"
+        >
+          <Search className="size-3" />
+          搜索
+        </button>
+
+        {/* 书签:加 */}
+        <button
+          onClick={() => {
+            setBmPage(String(page ?? ""));
+            setAdding((v) => !v);
+          }}
+          className={cn(tbBtn, adding && "border-sky-400 bg-sky-50 text-sky-600")}
+          title="给某一页加书签(开庭前标好重要页)"
+        >
+          <BookmarkPlus className="size-3" />
+          加书签
+        </button>
+
+        {/* 精读模式 toggle(pdf.js:真缩放/双指/选字书签;上百页大扫描件更吃内存,默认关) */}
+        <button
+          onClick={() => setMode((m) => (m === "native" ? "reader" : "native"))}
+          className={cn(
+            tbBtn,
+            "ml-auto",
+            mode === "reader" && "border-violet-400 bg-violet-50 text-violet-600",
+          )}
+          title="精读模式:pdf.js 渲染,可真缩放/双指/选中文字做书签(上百页大扫描件更吃内存)"
+        >
+          <BookOpen className="size-3" />
+          {mode === "reader" ? "退出精读" : "精读模式"}
+        </button>
+      </div>
+
+      {/* 搜索面板 */}
+      {searchOpen && (
+        <div className="shrink-0 border-b border-stone-100 bg-stone-50/80 px-3 py-2 text-xs">
+          <div className="flex items-center gap-2">
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") runSearch();
+              }}
+              placeholder="输入关键词,回车搜索"
+              autoFocus
+              className="min-w-0 flex-1 rounded border border-stone-300 px-2 py-1 outline-none focus:border-sky-400"
+            />
+            <button
+              onClick={runSearch}
+              disabled={searching}
+              className="rounded bg-sky-500 px-3 py-1 font-medium text-white hover:bg-sky-600 disabled:opacity-60"
+            >
+              {searching ? "搜索中…" : "搜索"}
+            </button>
+          </div>
+          {searchHits && (
+            <div className="mt-2 max-h-48 overflow-auto">
+              {searchHits.length === 0 ? (
+                <p className="text-stone-400">没找到「{searchQuery}」。</p>
+              ) : (
+                <ul className="space-y-1">
+                  {searchHits.map((h, i) => (
+                    <li key={i}>
+                      <button
+                        onClick={() => h.page && jumpTo(h.page)}
+                        disabled={!h.page}
+                        className={cn(
+                          "flex w-full items-start gap-2 rounded px-2 py-1 text-left",
+                          h.page ? "hover:bg-sky-100" : "cursor-default opacity-70",
+                        )}
+                        title={
+                          h.page
+                            ? `跳到第 ${h.page} 页`
+                            : "该文档无页码信息(重新抽取后可定位到页)"
+                        }
+                      >
+                        <span className="shrink-0 rounded bg-sky-100 px-1.5 py-0.5 font-medium text-sky-700">
+                          {h.page ? `第 ${h.page} 页` : "未知页"}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-stone-600">{h.snippet}</span>
+                        {h.count > 1 && (
+                          <span className="shrink-0 text-stone-400">×{h.count}</span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 加书签内联表单 */}
+      {adding && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-stone-100 bg-sky-50/60 px-3 py-1.5 text-xs text-stone-600">
+          <span>第</span>
+          <input
+            value={bmPage}
+            onChange={(e) => setBmPage(e.target.value.replace(/[^0-9]/g, ""))}
+            placeholder="页码"
+            inputMode="numeric"
+            className="w-12 rounded border border-stone-300 px-1.5 py-0.5 text-center outline-none focus:border-sky-400"
+          />
+          <span>页</span>
+          <input
+            value={bmLabel}
+            onChange={(e) => setBmLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") saveBookmark();
+            }}
+            placeholder="备注(可空,如:权利要求书)"
+            className="min-w-0 flex-1 rounded border border-stone-300 px-2 py-0.5 outline-none focus:border-sky-400"
+          />
+          <button
+            onClick={saveBookmark}
+            className="rounded bg-sky-500 px-2.5 py-0.5 font-medium text-white hover:bg-sky-600"
+          >
+            保存
+          </button>
+          <button
+            onClick={() => setAdding(false)}
+            className="rounded px-2 py-0.5 text-stone-400 hover:bg-stone-100"
+          >
+            取消
+          </button>
+        </div>
+      )}
+
+      {/* 书签条:有书签默认显示,点击直达 */}
+      {bookmarks.length > 0 && (
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-stone-100 bg-white px-3 py-1.5 text-xs">
+          <BookmarkIcon className="size-3.5 shrink-0 text-amber-500" />
+          {bookmarks.map((b) => (
+            <span
+              key={b.id}
+              className={cn(
+                "group/bm flex items-center gap-1 rounded-full border px-2 py-0.5",
+                page === b.page
+                  ? "border-amber-400 bg-amber-50 text-amber-700"
+                  : "border-stone-200 bg-stone-50 text-stone-600 hover:bg-stone-100",
+              )}
+            >
+              <button
+                onClick={() => jumpToBookmark(b)}
+                title={`跳到第 ${b.page} 页`}
+                className="flex items-center gap-1"
+              >
+                <span className="font-medium">P{b.page}</span>
+                {b.label && <span className="max-w-[160px] truncate">{b.label}</span>}
+              </button>
+              <button
+                onClick={() => removeBookmark(b.id)}
+                className="text-stone-300 hover:text-destructive"
+                title="删除书签"
+                aria-label="删除书签"
+              >
+                <X className="size-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* 渲染:默认原生 iframe(轻快);精读模式走 pdf.js(可缩放/双指/选字) */}
+      {mode === "native" ? (
+        <iframe key={reloadKey} src={src} title={filename} className="min-h-0 flex-1 border-0" />
+      ) : (
+        <PdfReaderView
+          sourcePath={sourcePath}
+          gotoPage={page}
+          focusY={focusY}
+          jumpNonce={jumpNonce}
+          highlights={highlights}
+          onAddBookmark={(p, label, rects) => addBookmarkDirect(p, label, rects)}
+          onOpenExternal={() => openInDefaultApp(sourcePath)}
+          onExit={() => setMode("native")}
+        />
+      )}
     </div>
   );
 }

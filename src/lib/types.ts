@@ -245,6 +245,13 @@ export interface Document {
    * 'ppocrv6' = 用户点了「去水印重新识别」→ 强制 PP-OCRv6+去水印;null = 常规 OCR 策略。
    */
   ocr_backend_override: string | null;
+  /**
+   * 2026-06-20(migration 0034)· 板内显示名(干净、带类型前缀的中文名,替代杂乱原文件名)。
+   * null = 回退原始 filename。纯元数据,不碰磁盘原件。
+   */
+  display_name: string | null;
+  /** 显示名来源:'user'(人工右键改名,永不被 AI 覆盖)/ 'ai_suggest'(AI 自动整理建议)。 */
+  display_name_source: string | null;
 }
 
 /** 对应 Rust 端 `ImportResult`,import_case_folder 命令的返回 */
@@ -278,6 +285,24 @@ export interface DocumentTag {
   source: string;
   created_at: string;
   updated_at: string;
+}
+
+/** 文档内搜索命中(2026-06-20)。对应 Rust `doc_search::SearchHit`。 */
+export interface SearchHit {
+  /** 命中页码(1-based);null = 文本无页码标记,无法定位(旧文档,重抽后支持) */
+  page: number | null;
+  snippet: string;
+  count: number;
+}
+
+/** PDF 页码书签(2026-06-20)。对应 Rust `db::bookmarks::Bookmark`。 */
+export interface Bookmark {
+  id: string;
+  document_id: string;
+  /** 1-based 页码 */
+  page: number;
+  label: string | null;
+  created_at: string;
 }
 
 /** 被忽略的目录。对应 Rust `case_split::IgnoredDir`。 */

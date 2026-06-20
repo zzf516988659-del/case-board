@@ -6,6 +6,7 @@ pub mod court_sms;
 pub mod db;
 pub mod deepseek;
 pub mod diagnostic_log;
+pub mod doc_search;
 pub mod docx_extract;
 pub mod docx_filing;
 pub mod embedding;
@@ -544,7 +545,7 @@ async fn verify_openai_compat_key(
 /// 2026-05-25 V0.1.8 · 检测版本更新。
 ///
 /// 前端启动时调一次(静默,失败不报错),设置页「检查更新」按钮也调。
-/// 数据源:lawtools.top 的 version.json。返回 UpdateInfo 给前端判断是否弹提示。
+/// 数据源:lawtools.top 仓库的 version.json。返回 UpdateInfo 给前端判断是否弹提示。
 #[tauri::command]
 async fn check_for_update() -> update::UpdateInfo {
     update::check_for_update().await
@@ -763,6 +764,70 @@ async fn set_document_category(
     db::document_tags::set_category(pool.inner(), &document_id, value.as_deref()).await
 }
 
+/// 人工设文档板内显示名(右键重命名)。`name=None`/空白 → 清回原文件名。
+/// 纯元数据,不动磁盘原件;改过后 AI 自动整理不再覆盖该名。
+#[tauri::command]
+async fn set_document_display_name(
+    pool: tauri::State<'_, SqlitePool>,
+    document_id: String,
+    name: Option<String>,
+) -> Result<(), String> {
+    documents_db::set_display_name(pool.inner(), &document_id, name.as_deref())
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
+/// 在某文档已抽取文本里按页搜索关键词,返回命中页码 + 摘要(前端点一下跳页)。
+/// 页码靠抽取时写入的 `--- 第 N 页 ---` 标记;旧文档无标记 → page=None(给摘要、提示重抽)。
+#[tauri::command]
+async fn search_in_document(
+    pool: tauri::State<'_, SqlitePool>,
+    document_id: String,
+    query: String,
+) -> Result<Vec<doc_search::SearchHit>, String> {
+    let doc = documents_db::get_document_by_id(pool.inner(), &document_id)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| "文档不存在".to_string())?;
+    let path = doc.extracted_text_path.ok_or_else(|| {
+        "这份材料还没抽取过文字,无法搜索(可能是跳过抽取的证据/图片)。".to_string()
+    })?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取抽取文本失败:{e}"))?;
+    Ok(doc_search::search_pages(&text, &query, 50))
+}
+
+/// 列某文档的 PDF 页码书签(按页升序)。
+#[tauri::command]
+async fn list_document_bookmarks(
+    pool: tauri::State<'_, SqlitePool>,
+    document_id: String,
+) -> Result<Vec<db::bookmarks::Bookmark>, String> {
+    db::bookmarks::list_by_document(pool.inner(), &document_id)
+        .await
+        .map_err(db_err)
+}
+
+/// 加一个 PDF 页码书签(page 1-based,label 可空)。返回新书签。
+#[tauri::command]
+async fn add_document_bookmark(
+    pool: tauri::State<'_, SqlitePool>,
+    document_id: String,
+    page: i64,
+    label: Option<String>,
+) -> Result<db::bookmarks::Bookmark, String> {
+    db::bookmarks::add(pool.inner(), &document_id, page, label.as_deref()).await
+}
+
+/// 删一个 PDF 页码书签。
+#[tauri::command]
+async fn delete_document_bookmark(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<(), String> {
+    db::bookmarks::delete(pool.inner(), &id).await.map(|_| ())
+}
+
 /// 🪄 AI 自动整理:一次 LLM 调用对整案材料判 重要度 + 归类,写成 `ai_suggest` 标记
 /// (**不覆盖人工标记**)。返回成功写入建议的材料数。
 ///
@@ -850,6 +915,10 @@ async fn ai_organize_inner(pool: &SqlitePool, case_id: &str) -> Result<usize, St
             &r.category,
         )
         .await;
+        // 显示名建议:仅当无人工改名时写(set_ai_display_name 内部保证人工永优先;空名跳过)
+        if let Some(name) = r.name.as_deref() {
+            let _ = documents_db::set_ai_display_name(pool, &r.id, name).await;
+        }
         n += 1;
     }
     Ok(n)
@@ -5271,6 +5340,11 @@ pub fn run() {
             set_document_importance,
             set_document_party_side,
             set_document_category,
+            set_document_display_name,
+            search_in_document,
+            list_document_bookmarks,
+            add_document_bookmark,
+            delete_document_bookmark,
             ai_organize_case,
             add_calendar_event,
             list_calendar_events,
