@@ -4,7 +4,7 @@
 > 把散落在文件夹里的诉讼材料,一眼看清「这个案件现在到哪一步」。
 
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%2011%2B-lightgrey.svg)](#安装)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](#安装)
 [![Stack](https://img.shields.io/badge/stack-Tauri%202%20%2B%20React%2019-1abc9c.svg)](#技术栈)
 
 ---
@@ -114,11 +114,11 @@ App 内右下「💬 反馈」按钮 → 自动收集诊断信息(版本 / OS / 
 
 ## 安装
 
-从 [lawtools.top](https://lawtools.top) 下载最新 dmg,拖到 Applications。
+从 [lawtools.top](https://lawtools.top) 下载最新安装包。
 
-首次打开:在 Applications 找到「案件看板」**右键 → 打开**(因为暂未购买 Apple 公证,直接双击会被 macOS 拦截),弹警告时点「打开」,以后双击即可。
+macOS 首次打开:在 Applications 找到「案件看板」**右键 → 打开**(因为暂未购买 Apple 公证,直接双击会被 macOS 拦截),弹警告时点「打开」,以后双击即可。
 
-系统要求:macOS 11+ · Apple Silicon 推荐(Intel 也支持)。
+系统要求:macOS 11+ / Windows 10+。
 
 ## 技术栈
 
@@ -205,7 +205,7 @@ caseboard/
 
 ## 状态
 
-- ✅ 当前 v0.3.x,可装可用,作者本人每日实务使用(macOS dmg 见 [lawtools.top](https://lawtools.top))
+- ✅ 当前公开版 v0.3.25,可装可用(下载见 [lawtools.top](https://lawtools.top))
 - 🐢 个人项目节奏:issue / PR 会看,但不承诺响应时限;Windows / Linux 移植欢迎 PR(适配点见上文)
 
 ## 反馈 & 贡献

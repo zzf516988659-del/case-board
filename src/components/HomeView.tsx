@@ -49,6 +49,7 @@ import {
   listCalendarEvents,
   listOpenTodos,
   type OpenTodoRow,
+  readTextFile,
   updateHomeCaseOrder,
   updateTodo,
   updateWorkflowStatus,
@@ -66,6 +67,10 @@ import { parseJsonArray } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useFeatureFlag } from "@/lib/featureFlags";
 import { CalendarBoard } from "./CalendarBoard";
+import {
+  loadHearingDisplayDetail,
+  type HearingDisplayDetail,
+} from "./homeHearingDetails";
 import {
   compareCasesByStatusThenTime,
   resolveCaseStatus,
@@ -117,6 +122,8 @@ export interface UpcomingEvent {
   daysFromNow: number;
   type: string;
   note?: string | null;
+  timeText?: string | null;
+  locationText?: string | null;
   caseName: string;
   caseId: string;
   court?: string | null;
@@ -158,6 +165,9 @@ export function HomeView({
   const [calendarEnabled, setCalendarEnabled] = useState(false);
   // 飞书日历开关(法律工具→飞书日历卡里开;开了用飞书月历替代本地日程卡)
   const [feishuEnabled, setFeishuEnabled] = useState(false);
+  const [hearingDetails, setHearingDetails] = useState<
+    Record<string, HearingDisplayDetail>
+  >({});
   // 2026-06-16 · 首页清爽开关(设置页「功能开关」tab,默认关,逐设备生效)
   const [filterBarOn] = useFeatureFlag("home_filter_bar");
   const [ticktickOn] = useFeatureFlag("home_ticktick");
@@ -328,12 +338,57 @@ export function HomeView({
   const activeCases = defaultSorted
     .filter(({ status }) => status.id !== "closed" && status.id !== "mediated")
     .map(({ caseData }) => caseData);
-  const upcomingEvents = buildUpcomingEvents(activeCases);
+  const upcomingEventsBase = buildUpcomingEvents(activeCases);
+  const upcomingEvents = useMemo(
+    () =>
+      upcomingEventsBase.map((event) => ({
+        ...event,
+        ...(hearingDetails[upcomingEventKey(event)] ?? {}),
+      })),
+    [hearingDetails, upcomingEventsBase],
+  );
+  const hearingEventsSeed = upcomingEventsBase
+    .filter((event) => event.kind === "hearing")
+    .map(upcomingEventKey)
+    .join("||");
   const calendarEvents = [
     ...buildAllCalendarEvents(activeCases),
     ...buildTodoEvents(openTodos),
     ...buildManualEvents(manualEvents),
   ];
+
+  useEffect(() => {
+    let cancelled = false;
+    const hearingEvents = upcomingEventsBase.filter((event) => event.kind === "hearing");
+    if (hearingEvents.length === 0) {
+      setHearingDetails({});
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    (async () => {
+      const pairs = await Promise.all(
+        hearingEvents.map(async (event) => {
+          const detail = await loadHearingDisplayDetail(
+            docsByCase[event.caseId] ?? [],
+            event.date,
+            readTextFile,
+          );
+          return [upcomingEventKey(event), detail] as const;
+        }),
+      );
+      if (cancelled) return;
+      const next = Object.fromEntries(
+        pairs.filter((entry): entry is [string, HearingDisplayDetail] => !!entry[1]),
+      );
+      setHearingDetails(next);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [docsByCase, hearingEventsSeed]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -1578,6 +1633,10 @@ function EventRow({
     tone === "red"
       ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
       : "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
+  const primaryDetail =
+    e.kind === "hearing"
+      ? [e.timeText, e.locationText].filter(Boolean).join(" · ") || null
+      : null;
 
   return (
     <li>
@@ -1597,7 +1656,14 @@ function EventRow({
             <span className="text-sm font-semibold text-foreground">{e.type}</span>
             {hint && <span className={`rounded px-1.5 py-0.5 text-caption font-medium ${hintCls}`}>{hint}</span>}
           </div>
-          {e.note && <p className="mt-0.5 truncate text-xs text-muted-foreground">{e.note}</p>}
+          {primaryDetail && (
+            <p className="mt-0.5 truncate text-xs font-medium text-foreground/85">
+              {primaryDetail}
+            </p>
+          )}
+          {e.note && e.note !== primaryDetail && (
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">{e.note}</p>
+          )}
           <p className="mt-0.5 truncate text-xs text-foreground/80">{e.caseName}</p>
           {e.court && <p className="mt-0.5 truncate text-caption text-muted-foreground/70">{e.court}</p>}
         </div>
@@ -2212,6 +2278,10 @@ function todayDate(): Date {
 
 function diffDays(a: Date, b: Date): number {
   return Math.round((a.getTime() - b.getTime()) / 86400000);
+}
+
+function upcomingEventKey(event: UpcomingEvent): string {
+  return `${event.caseId}|${event.type}|${event.date}`;
 }
 
 function toDateKey(d: Date): string {

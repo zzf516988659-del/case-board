@@ -239,7 +239,7 @@ pub struct Settings {
     pub chat_context_budget_attached: Option<u32>,
     /// chat 历史对话段 char 预算(默认 40_000,超出走 compaction)
     pub chat_context_budget_history: Option<u32>,
-    /// chat agent loop 最大迭代轮数(默认 12;见 with_defaults_for_display)
+    /// chat agent loop 最大迭代轮数(默认 16;见 with_defaults_for_display)
     pub chat_loop_max_iters: Option<u32>,
     /// chat 单条消息最多引用文档数(默认 5)
     pub chat_max_attached: Option<u32>,

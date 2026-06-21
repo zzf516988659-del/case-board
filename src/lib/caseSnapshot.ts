@@ -78,6 +78,7 @@ export function computeCaseSnapshot(
   caseData: Case,
   documents: Document[],
 ): CaseSnapshot {
+  const statusText = sanitizeStatusText(caseData.agg_status_text);
   return {
     basedOnDocs: documents.length,
     computedAt: caseData.agg_computed_at,
@@ -87,7 +88,7 @@ export function computeCaseSnapshot(
     court: caseData.agg_court,
     cause: caseData.agg_cause,
     case_stage: null,
-    case_status: caseData.agg_status_text ?? null,
+    case_status: statusText,
     filed_at: caseData.agg_filed_at,
     expected_close_at: null,
     case_note: null,
@@ -106,10 +107,34 @@ export function computeCaseSnapshot(
 
     summary: caseData.case_summary,
     resolution: caseData.agg_resolution,
-    status_text: caseData.agg_status_text,
+    status_text: statusText,
 
     our_side: caseData.agg_our_side,
   };
+}
+
+function sanitizeStatusText(text: string | null): string | null {
+  if (!text) return null;
+  const match = text.match(/(\d{4}-\d{2}-\d{2})\s*已开庭/g);
+  if (!match) return text;
+  let next = text;
+  for (const hit of match) {
+    const date = hit.slice(0, 10);
+    if (isFutureIsoDate(date)) {
+      next = next.replace(hit, `${date} 待开庭`);
+    }
+  }
+  return next;
+}
+
+function isFutureIsoDate(isoDate: string): boolean {
+  const today = new Date();
+  const todayKey = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-");
+  return isoDate > todayKey;
 }
 
 /* ============ adapter:LLM JSON → UI TS 类型 ============ */

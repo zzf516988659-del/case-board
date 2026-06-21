@@ -507,7 +507,7 @@ export interface Settings {
   chat_context_budget_system: number | null;
   chat_context_budget_attached: number | null;
   chat_context_budget_history: number | null;
-  /** chat agent loop 最大迭代轮数(默认 8)。 */
+  /** chat agent loop 最大迭代轮数(默认 16)。 */
   chat_loop_max_iters: number | null;
   /** chat 单条消息最多引用文档数(默认 5)。 */
   chat_max_attached: number | null;

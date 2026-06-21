@@ -326,6 +326,7 @@ pub async fn case_chat_impl(
         }
     }
     let agent_req = AgentLoopRequest {
+        task_type: task,
         system_prompt: constitution_prompt,
         history: history.clone(),
         user_message: user_message_final.clone(),

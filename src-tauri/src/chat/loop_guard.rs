@@ -1,10 +1,11 @@
-//! agent_loop 的 4 条 cap(V0.2 D3-D4.B,详 § 6.5)。
+//! agent_loop 的 5 条 cap(V0.2 D3-D4.B,详 § 6.5)。
 //!
 //! 在 chat agent 多轮工具调用循环里,防止"无限调"、"反复调同一个工具"、"调用堆积太久"、
-//! "thinking 模型 reasoning token 爆炸"四种失控情况。
+//! "长时间无进展卡住"、"thinking 模型 reasoning token 爆炸"五种失控情况。
 //!
 //! 每轮 LLM 请求前调 `check_iter_cap` + `check_duration_cap`;每次准备发起 tool 调用前调
-//! `check_duplicate_tool_call`;LLM 返回 usage 后调 `add_reasoning_tokens`。
+//! `check_duplicate_tool_call`;流式 token/reasoning/tool 结果到来时调 `note_progress`;
+//! LLM 返回 usage 后调 `add_reasoning_tokens`。
 //!
 //! 任何一个 cap 触发 → 返回 `LoopGuardViolation`,agent_loop 终止本轮并把信息塞回 LLM 让它
 //! 收尾(或者直接 abort,看上层策略)。
@@ -15,7 +16,16 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use thiserror::Error;
 
-/// 4 条 cap 中触发哪一条。
+use super::context::TaskType;
+
+pub const DEFAULT_CHAT_LOOP_TIMEOUT_DEFAULT_SECS: u64 = 300;
+pub const DEFAULT_CHAT_LOOP_TIMEOUT_COMPLEX_SECS: u64 = 480;
+pub const DEFAULT_CHAT_LOOP_TIMEOUT_DEEP_ANALYSIS_SECS: u64 = 900;
+pub const DEFAULT_CHAT_LOOP_IDLE_TIMEOUT_SECS: u64 = 180;
+const MIN_CHAT_LOOP_TIMEOUT_SECS: u64 = 60;
+const MIN_CHAT_LOOP_IDLE_TIMEOUT_SECS: u64 = 30;
+
+/// 5 条 cap 中触发哪一条。
 #[derive(Debug, Clone, Serialize, Error)]
 pub enum LoopGuardViolation {
     #[error("超过本会话最大轮数(max={max})")]
@@ -24,8 +34,43 @@ pub enum LoopGuardViolation {
     DuplicateToolCall { tool: String },
     #[error("本会话总耗时超 {limit_secs}s,可能后端慢或卡死,提前 abort")]
     DurationCapExceeded { limit_secs: u64 },
+    #[error("连续 {idle_secs}s 没有新进展(token / reasoning / 工具结果),疑似卡住,提前 abort")]
+    IdleCapExceeded { idle_secs: u64 },
     #[error("reasoning token 累计超 {limit},thinking 模型可能跑飞")]
     ReasoningTokenCapExceeded { limit: u64 },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoopGuardConfig {
+    pub max_iters: u32,
+    pub max_duration: Duration,
+    pub idle_timeout: Duration,
+    pub max_reasoning_tokens: u64,
+}
+
+impl LoopGuardConfig {
+    pub fn from_settings_for_task(s: &crate::settings::Settings, task: TaskType) -> Self {
+        let max_duration_secs = match task {
+            TaskType::DeepAnalysis | TaskType::CriminalDeepAnalysis => {
+                DEFAULT_CHAT_LOOP_TIMEOUT_DEEP_ANALYSIS_SECS
+            }
+            TaskType::CompileLegalBasis
+            | TaskType::FindSimilarCases
+            | TaskType::VerifyMyDraft
+            | TaskType::SimulateOpposition => DEFAULT_CHAT_LOOP_TIMEOUT_COMPLEX_SECS,
+            TaskType::FreeChat => DEFAULT_CHAT_LOOP_TIMEOUT_DEFAULT_SECS,
+        }
+        .max(MIN_CHAT_LOOP_TIMEOUT_SECS);
+        let idle_secs = DEFAULT_CHAT_LOOP_IDLE_TIMEOUT_SECS
+            .max(MIN_CHAT_LOOP_IDLE_TIMEOUT_SECS)
+            .min(max_duration_secs);
+        Self {
+            max_iters: s.chat_loop_max_iters.unwrap_or(16),
+            max_duration: Duration::from_secs(max_duration_secs),
+            idle_timeout: Duration::from_secs(idle_secs),
+            max_reasoning_tokens: 64_000,
+        }
+    }
 }
 
 pub struct LoopGuard {
@@ -34,31 +79,43 @@ pub struct LoopGuard {
     seen_tool_args: HashSet<(String, String)>,
     started_at: Instant,
     max_duration: Duration,
+    last_progress_at: Instant,
+    idle_timeout: Duration,
     reasoning_tokens: u64,
     max_reasoning_tokens: u64,
 }
 
 impl LoopGuard {
-    /// 用 settings 配置 4 条 cap。settings 字段为 None 时用默认值。
-    pub fn from_settings(s: &crate::settings::Settings) -> Self {
+    pub fn from_config(cfg: LoopGuardConfig) -> Self {
         Self {
             iter_count: 0,
-            // 复杂法律任务(法规+案例+企业+校验+综合)轮数偏多,默认放到 16
-            //(2026-05-31 从 12 上调:执行案法律依据曾贴满 12 轮靠 force-finish 收尾,可能漏法条)
-            max_iters: s.chat_loop_max_iters.unwrap_or(16),
+            max_iters: cfg.max_iters,
             seen_tool_args: HashSet::new(),
             started_at: Instant::now(),
-            // 思考模型 + 多轮工具 + 写长答案,120s 墙钟太紧;放到 300s。
-            // 真跑飞仍有 max_iters / max_reasoning_tokens 双重兜底。
-            max_duration: Duration::from_secs(300),
+            max_duration: cfg.max_duration,
+            last_progress_at: Instant::now(),
+            idle_timeout: cfg.idle_timeout,
             reasoning_tokens: 0,
-            // thinking 模型每轮 reasoning 几千 token,多轮累积易超 8000;放到 64000。
-            max_reasoning_tokens: 64_000,
+            max_reasoning_tokens: cfg.max_reasoning_tokens,
         }
+    }
+
+    /// 用 settings + 任务类型配置 5 条 cap。settings 字段为 None 时用默认值。
+    pub fn from_settings_for_task(s: &crate::settings::Settings, task: TaskType) -> Self {
+        Self::from_config(LoopGuardConfig::from_settings_for_task(s, task))
     }
 
     pub fn iter_count(&self) -> u32 {
         self.iter_count
+    }
+
+    pub fn idle_timeout_secs(&self) -> u64 {
+        self.idle_timeout.as_secs()
+    }
+
+    /// 收到新的 token / reasoning / 工具结果时更新最近进展时间。
+    pub fn note_progress(&mut self) {
+        self.last_progress_at = Instant::now();
     }
 
     /// 进入新一轮(发请求前调)。失败返回 `IterCapExceeded`。
@@ -90,11 +147,21 @@ impl LoopGuard {
         Ok(())
     }
 
-    /// 每次工具调用 / LLM 调用后调一次。超过 2 分钟就 abort。
+    /// 检查整轮会话的总墙钟时长是否超出当前任务的内置上限。
     pub fn check_duration_cap(&self) -> Result<(), LoopGuardViolation> {
         if self.started_at.elapsed() > self.max_duration {
             return Err(LoopGuardViolation::DurationCapExceeded {
                 limit_secs: self.max_duration.as_secs(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 连续太久没有任何新进展(token / reasoning / 工具结果)就判定为卡住。
+    pub fn check_idle_cap(&self) -> Result<(), LoopGuardViolation> {
+        if self.last_progress_at.elapsed() > self.idle_timeout {
+            return Err(LoopGuardViolation::IdleCapExceeded {
+                idle_secs: self.idle_timeout.as_secs(),
             });
         }
         Ok(())

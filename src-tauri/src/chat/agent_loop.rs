@@ -34,6 +34,7 @@ use tokio::sync::oneshot;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use super::context::TaskType;
 use super::hooks::{HookChain, HookContext, HookOutcome, SessionStats};
 use super::loop_guard::{LoopGuard, LoopGuardViolation};
 use super::stream::{ChatStreamEvent, ChatUsage};
@@ -42,6 +43,7 @@ use crate::llm::LlmConfig;
 
 /// agent_loop 调用入参(跟 `stream::ChatStreamRequest` 平行,字段略多)。
 pub struct AgentLoopRequest {
+    pub task_type: TaskType,
     pub system_prompt: String,
     pub history: Vec<(String, String)>,
     pub user_message: String,
@@ -119,6 +121,27 @@ pub struct AskQuestion {
 /// 从 `ask_user` 工具调用的 args 防御式解析出问题列表。
 /// 期望形状 `{ "questions": [ {question, options?, allow_input?} ] }`;
 /// 任何字段缺失 / 类型不符都跳过该条,question 为空的条目丢弃。**永不 panic**。
+fn parse_ask_user_option(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        }
+        Value::Object(map) => ["label", "text", "value", "title", "option"]
+            .iter()
+            .filter_map(|key| map.get(*key))
+            .find_map(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
 fn parse_ask_user_args(args: &Value) -> Vec<AskQuestion> {
     let Some(arr) = args.get("questions").and_then(|v| v.as_array()) else {
         return Vec::new();
@@ -133,10 +156,10 @@ fn parse_ask_user_args(args: &Value) -> Vec<AskQuestion> {
                 .get("options")
                 .and_then(|v| v.as_array())
                 .map(|a| {
+                    let mut seen = std::collections::HashSet::new();
                     a.iter()
-                        .filter_map(|o| o.as_str())
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
+                        .filter_map(parse_ask_user_option)
+                        .filter(|s| seen.insert(s.clone()))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -401,7 +424,7 @@ pub async fn run_chat_with_tools(
     tx: UnboundedSender<ChatStreamEvent>,
     mut cancel: oneshot::Receiver<()>,
 ) -> Result<AgentLoopOutput, AgentLoopError> {
-    let mut guard = LoopGuard::from_settings(ctx.settings);
+    let mut guard = LoopGuard::from_settings_for_task(ctx.settings, req.task_type);
     let mut messages = build_initial_messages(&req);
     let tool_schemas = registry.to_function_schemas();
     // V0.3.5 · 前缀缓存稳定性:被动算一次 system+tools 指纹,落 metrics 供离线看漂移(绝不改请求本身)。
@@ -445,8 +468,17 @@ pub async fn run_chat_with_tools(
                 role: "user".into(),
                 content: FORCE_FINISH_PROMPT.into(),
             });
-            match stream_one_request(&endpoint, config, &messages, &req, &[], &tx, &mut cancel)
-                .await
+            match stream_one_request(
+                &endpoint,
+                config,
+                &messages,
+                &req,
+                &[],
+                &tx,
+                &mut cancel,
+                &mut guard,
+            )
+            .await
             {
                 Ok(o) => {
                     full_content.push_str(&o.content);
@@ -467,6 +499,7 @@ pub async fn run_chat_with_tools(
             break;
         }
         guard.check_duration_cap()?;
+        guard.check_idle_cap()?;
 
         // 1) 跑一次流式请求,拿 (content_delta, tool_calls, finish_reason, usage_chunk)
         let turn_started = std::time::Instant::now();
@@ -478,6 +511,7 @@ pub async fn run_chat_with_tools(
             &tool_schemas,
             &tx,
             &mut cancel,
+            &mut guard,
         )
         .await
         {
@@ -543,6 +577,7 @@ pub async fn run_chat_with_tools(
                         if full_content.trim().is_empty() {
                             full_content.push_str("为把这份内容写准确,我需要先和你确认几点 👇");
                         }
+                        guard.note_progress();
                         let _ = tx.send(ChatStreamEvent::AskUser {
                             questions: questions.clone(),
                         });
@@ -654,6 +689,7 @@ pub async fn run_chat_with_tools(
                         let _ = tx.send(ChatStreamEvent::ToolCall {
                             record: rec.clone(),
                         });
+                        guard.note_progress();
                         tool_trace.push(rec);
                     } else if let Some((id, tool, reason, args)) =
                         denied.iter().find(|(id, ..)| id == &fc.id)
@@ -678,6 +714,7 @@ pub async fn run_chat_with_tools(
                         let _ = tx.send(ChatStreamEvent::ToolCall {
                             record: rec.clone(),
                         });
+                        guard.note_progress();
                         tool_trace.push(rec);
                     } else {
                         // V0.2.2 · 兜底:某 tool_call 既不在 sub_results 也不在 denied
@@ -782,6 +819,7 @@ struct ChunkUsage {
     model: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_one_request(
     endpoint: &str,
     config: &LlmConfig,
@@ -790,6 +828,7 @@ async fn stream_one_request(
     tool_schemas: &[Value],
     tx: &UnboundedSender<ChatStreamEvent>,
     cancel: &mut oneshot::Receiver<()>,
+    guard: &mut LoopGuard,
 ) -> Result<OneStreamPass, AgentLoopError> {
     // 空工具集(fix 3 强制收尾轮)时强制 tool_choice="none":避免 "required"(flash 模型)
     // + 无工具 → DeepSeek 400,否则收尾轮被打掉、拿不到最终答案。
@@ -817,7 +856,7 @@ async fn stream_one_request(
     // "error decoding response body";read_timeout 只在流真正卡死(两次读间隔超时)才触发。
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(config.timeout_secs.max(120)))
+        .read_timeout(Duration::from_secs(guard.idle_timeout_secs().max(30)))
         .build()
         .map_err(|e| AgentLoopError::Network(e.to_string()))?;
 
@@ -870,7 +909,7 @@ async fn stream_one_request(
         }
 
         // 成功 → 解析流
-        return parse_stream(response, tx, cancel).await;
+        return parse_stream(response, tx, cancel, guard).await;
     }
     Err(last_err.unwrap_or_else(|| AgentLoopError::Network("请求重试用尽".into())))
 }
@@ -879,6 +918,7 @@ async fn parse_stream(
     response: reqwest::Response,
     tx: &UnboundedSender<ChatStreamEvent>,
     cancel: &mut oneshot::Receiver<()>,
+    guard: &mut LoopGuard,
 ) -> Result<OneStreamPass, AgentLoopError> {
     use futures::StreamExt;
     let mut stream = response.bytes_stream();
@@ -897,6 +937,9 @@ async fn parse_stream(
                 None => break,
                 Some(Err(e)) => return Err(AgentLoopError::Network(e.to_string())),
                 Some(Ok(bytes)) => {
+                    guard.note_progress();
+                    guard.check_duration_cap()?;
+                    guard.check_idle_cap()?;
                     let s = match std::str::from_utf8(&bytes) {
                         Ok(s) => s.to_string(),
                         Err(_) => String::from_utf8_lossy(&bytes).into_owned(),
