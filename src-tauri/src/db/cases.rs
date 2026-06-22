@@ -281,10 +281,40 @@ pub async fn set_summary_if_empty(
 
 /// 删除一个案件(级联删除所有关联表:documents/events/contacts/...)。
 pub async fn delete_case(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+    // 2026-06-22:17 张子表 FK 引用 cases.id,ON DELETE 全部 NO ACTION,
+    // 直接 DELETE FROM cases 会被 SQLite FK 约束挡(返回 error 787)。
+    // 用事务显式清掉所有引用,再删 cases 本身。
+    let mut tx = pool.begin().await?;
+    const CHILD_TABLES: &[&str] = &[
+        "case_fees",
+        "case_instances",
+        "case_logs",
+        "case_payments",
+        "case_preservations",
+        "case_stages",
+        "case_todos",
+        "chat_messages",
+        "chat_tasks",
+        "contacts",
+        "court_filing_jobs",
+        "documents",
+        "events",
+        "execution_payments",
+        "execution_targets",
+        "mail_records",
+        "parties",
+    ];
+    for table in CHILD_TABLES {
+        sqlx::query(&format!("DELETE FROM {} WHERE case_id = ?", table))
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("DELETE FROM cases WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -341,3 +371,111 @@ pub async fn update_user_overrides(
 // ============================================================================
 // 测试
 // ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    /// 建内存 SQLite + 跑必要 migration 建表结构,模拟 production FK 约束。
+    /// 注意:SQLite 默认 FK 是 OFF,必须显式 ON 才能 enforce。
+    async fn make_test_pool() -> SqlitePool {
+        let opts = SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true); // FK enforce
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        // 简化版 schema,只覆盖 17 张 FK 子表的关键字段
+        for ddl in &[
+            "CREATE TABLE cases (id TEXT PRIMARY KEY, name TEXT, agg_court TEXT, court TEXT, status TEXT, created_at TEXT, updated_at TEXT)",
+            "CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION, filename TEXT)",
+            "CREATE TABLE case_instances (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION, level TEXT)",
+            "CREATE TABLE contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT REFERENCES cases(id) ON DELETE NO ACTION, name TEXT)",
+            "CREATE TABLE court_filing_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT REFERENCES cases(id) ON DELETE NO ACTION, status TEXT)",
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION, event_type TEXT)",
+            "CREATE TABLE chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION, role TEXT)",
+            "CREATE TABLE parties (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION, role TEXT)",
+            "CREATE TABLE case_fees (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE case_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE case_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE case_preservations (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE case_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE case_todos (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE chat_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE execution_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE execution_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+            "CREATE TABLE mail_records (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE NO ACTION)",
+        ] {
+            sqlx::query(ddl).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    async fn seed(pool: &SqlitePool, case_id: &str) {
+        sqlx::query("INSERT INTO cases (id, name) VALUES (?, ?)")
+            .bind(case_id).bind("测试案件")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO documents (case_id, filename) VALUES (?, ?)")
+            .bind(case_id).bind("a.pdf")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO documents (case_id, filename) VALUES (?, ?)")
+            .bind(case_id).bind("b.pdf")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO case_instances (case_id, level) VALUES (?, ?)")
+            .bind(case_id).bind("一审")
+            .execute(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_case_removes_case_and_children() {
+        let pool = make_test_pool().await;
+        let id = "case-1";
+        seed(&pool, id).await;
+
+        delete_case(&pool, id).await.expect("delete 应成功");
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE id = ?")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "cases 行应被删");
+
+        let docs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE case_id = ?")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(docs, 0, "documents 子行应被删");
+
+        let ci: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM case_instances WHERE case_id = ?")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(ci, 0, "case_instances 子行应被删");
+    }
+
+    #[tokio::test]
+    async fn delete_case_does_not_affect_other_cases() {
+        let pool = make_test_pool().await;
+        seed(&pool, "case-a").await;
+        seed(&pool, "case-b").await;
+
+        delete_case(&pool, "case-a").await.expect("delete 应成功");
+
+        let a: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE id = ?")
+            .bind("case-a").fetch_one(&pool).await.unwrap();
+        assert_eq!(a, 0);
+
+        let b: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE id = ?")
+            .bind("case-b").fetch_one(&pool).await.unwrap();
+        assert_eq!(b, 1, "case-b 不应受影响");
+
+        let b_docs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE case_id = ?")
+            .bind("case-b").fetch_one(&pool).await.unwrap();
+        assert_eq!(b_docs, 2, "case-b 的 documents 应保留");
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_case_is_noop() {
+        let pool = make_test_pool().await;
+        delete_case(&pool, "ghost").await.expect("不存在的 id 应 noop 成功");
+    }
+}
