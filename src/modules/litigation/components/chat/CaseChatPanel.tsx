@@ -41,9 +41,9 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+// 2026-06-23 PR #25:Windows 跨 webview 死锁,CaseChatPanel 不再 invoke detach_chat_window
+// 也不调 getCurrentWindow().close() (因为没在独立 webview 里)。Rust 端命令保留但前端不调。
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -240,6 +240,16 @@ export function CaseChatPanel({
       return CHAT_PANEL_WIDTH_DEFAULT;
     }
   });
+  /**
+   * 2026-06-23 PR #25 修复后:Windows 上 WebView2 跨 webview 进程渲染 React 有深层
+   * bug(连 hello world 都空白),独立 webview 方案彻底走不通。
+   *
+   * 替代方案:在主窗口内做全屏覆盖层(`fixed inset-0 z-50`)。
+   * - UI 上等同独立窗口:消息列表 + 输入框 + 流式响应都正常
+   * - 完全同一个 webview 进程,避开跨 webview 死锁
+   * - Mac / Linux 上 detached prop 仍保留,未来 gcheng001 修好跨 webview 可用
+   */
+  const [poppedOut, setPoppedOut] = useState(false);
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -309,25 +319,18 @@ export function CaseChatPanel({
       setError("当前案件的 AI 任务完成后才能切换到独立界面。");
       return;
     }
-    try {
-      await invoke("detach_chat_window", {
-        caseId,
-        caseName: caseName ?? null,
-        domain,
-      });
-      setRestorePulse(false);
-      setCollapsed(true);
-    } catch (e) {
-      setError(formatError(e));
-    }
+    // 2026-06-23 PR #25:Windows 跨 webview 进程死锁,改用主窗口内全屏覆盖层替代独立窗口。
+    // Mac/Linux 上若未来 gcheng001 修好跨 webview,可改回 invoke("detach_chat_window", ...)。
+    setPoppedOut(true);
+    setRestorePulse(false);
   };
 
   const reattachChatPanel = async () => {
-    try {
-      await getCurrentWindow().close();
-    } catch (e) {
-      setError(formatError(e));
-    }
+    // 2026-06-23 PR #25:从主窗口内全屏回到侧栏,只切 state,不调 getCurrentWindow().close()
+    // —— 我们没在独立 webview,这是同一个 webview 的两个渲染位置。
+    setPoppedOut(false);
+    setRestorePulse(true);
+    setTimeout(() => setRestorePulse(false), 1200);
   };
 
   // V0.2 D6-D7 · attached chip 用,对 caseDocs 按 id 索引
@@ -578,16 +581,25 @@ export function CaseChatPanel({
     <aside
       className={cn(
         "relative flex h-full shrink-0 flex-col border-border bg-card/30 transition-[width,box-shadow,background-color] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
-        detached
-          ? "w-full border-l-0"
-          : collapsed
-            ? "w-12 items-center border-l"
-            : "border-l",
+        poppedOut
+          ? "fixed inset-0 z-50 w-full border-l-0 bg-background shadow-2xl"
+          : detached
+            ? "w-full border-l-0"
+            : collapsed
+              ? "w-12 items-center border-l"
+              : "border-l",
         restorePulse &&
           !detached &&
+          !poppedOut &&
           "bg-sky-50/55 shadow-[-12px_0_28px_-24px_rgba(14,165,233,0.95)] dark:bg-sky-950/20",
       )}
-      style={!detached && !collapsed ? { width: panelWidth } : undefined}
+      style={
+        poppedOut
+          ? undefined
+          : !detached && !collapsed
+            ? { width: panelWidth }
+            : undefined
+      }
     >
       {collapsed ? (
         <button
@@ -639,7 +651,7 @@ export function CaseChatPanel({
           >
             <Trash2 className="size-3.5" />
           </button>
-          {!detached && caseId && (
+          {!detached && !poppedOut && caseId && (
             <button
               type="button"
               onClick={detachChatPanel}
@@ -647,15 +659,15 @@ export function CaseChatPanel({
               className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
               title={
                 isStreaming
-                  ? "当前任务完成后可独立显示"
-                  : "独立显示(可最大化或拖到外接屏)"
+                  ? "当前任务完成后可全屏显示"
+                  : "全屏显示 AI 助手(铺满主窗口,避开外接屏跨进程渲染问题)"
               }
-              aria-label="将 AI 助手独立显示"
+              aria-label="将 AI 助手全屏显示"
             >
               <ExternalLink className="size-3.5" />
             </button>
           )}
-          {!detached && (
+          {!detached && !poppedOut && (
             <button
               type="button"
               onClick={() => setCollapsed(true)}
@@ -666,7 +678,7 @@ export function CaseChatPanel({
               <ChevronRight className="size-3.5" />
             </button>
           )}
-          {detached && (
+          {(detached || poppedOut) && (
             <button
               type="button"
               onClick={reattachChatPanel}
