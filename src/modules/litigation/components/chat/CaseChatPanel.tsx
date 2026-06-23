@@ -643,14 +643,13 @@ export function CaseChatPanel({
             <button
               type="button"
               onClick={detachChatPanel}
-              disabled={isStreaming}
+              // 2026-06-23:Windows 上 DetachedChatWindow 打开后 webview 永久空白 + 无法关闭。
+              // 调查发现多根因(WebView2 layout thrashing + 跨窗口 SqlitePool 死锁),
+              // 临时禁用避免影响用户工作。gcheng001 (PR #18 作者) 修后恢复。
+              disabled={isStreaming || true}
               className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
-              title={
-                isStreaming
-                  ? "当前任务完成后可独立显示"
-                  : "独立显示(可最大化或拖到外接屏)"
-              }
-              aria-label="将 AI 助手独立显示"
+              title="独立显示:Windows 上 PR #18 已知 bug,暂时禁用"
+              aria-label="将 AI 助手独立显示(暂时禁用)"
             >
               <ExternalLink className="size-3.5" />
             </button>
