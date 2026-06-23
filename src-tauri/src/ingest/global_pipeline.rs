@@ -114,6 +114,9 @@ pub async fn run_global_extract(
     // 2. 读 MD 文件内容(本地 IO,blocking,但量小可接受)
     let mut docs: Vec<DocInput> = Vec::with_capacity(rows.len());
     for (filename, category, stage, text_path) in &rows {
+        if crate::ingest::pipeline::is_archival_category(category.as_deref()) {
+            continue;
+        }
         let Some(p) = text_path else {
             crate::dlog!("[global_extract] {} 无 extracted_text_path,跳过", filename);
             continue;

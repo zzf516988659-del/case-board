@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   CheckCircle2,
@@ -20,6 +20,7 @@ import {
 import { type Document, STAGE_ORDER } from "@/lib/types";
 import { formatBytes } from "@/lib/format";
 import { cn, docDisplayName } from "@/lib/utils";
+import { useFeatureFlag } from "@/lib/featureFlags";
 
 import { type GroupKey } from "../lib/groupByStage";
 import {
@@ -1082,6 +1083,31 @@ function MarkContextMenu({
   onRename?: () => void;
   onClose: () => void;
 }) {
+  const [referenceMaterialsEnabled] = useFeatureFlag("reference_materials");
+  const visibleCategories = referenceMaterialsEnabled
+    ? CATEGORIES
+    : CATEGORIES.filter((category) => category !== "参考材料");
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ left: x, top: y });
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+    const padding = 8;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.max(
+      padding,
+      Math.min(x, window.innerWidth - rect.width - padding),
+    );
+    const top = Math.max(
+      padding,
+      Math.min(y, window.innerHeight - rect.height - padding),
+    );
+    setPosition((current) =>
+      current.left === left && current.top === top ? current : { left, top },
+    );
+  }, [x, y, onCategory, onRename]);
+
   useEffect(() => {
     const close = () => onClose();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -1101,17 +1127,14 @@ function MarkContextMenu({
     };
   }, [onClose]);
 
-  // 防溢出屏幕右/下边
-  const left = Math.min(x, window.innerWidth - 200);
-  const top = Math.min(y, window.innerHeight - 280);
-
   const item =
     "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent";
 
   return createPortal(
     <div
-      style={{ left, top }}
-      className="fixed z-[120] w-48 rounded-lg border border-border bg-popover p-1 shadow-xl"
+      ref={menuRef}
+      style={position}
+      className="fixed z-[120] max-h-[calc(100vh-16px)] w-48 overflow-y-auto rounded-lg border border-border bg-popover p-1 shadow-xl"
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
     >
@@ -1179,7 +1202,7 @@ function MarkContextMenu({
         <>
           <div className="my-1 border-t border-border" />
           <div className="px-2 py-0.5 text-[11px] text-muted-foreground">归类</div>
-          {CATEGORIES.map((c) => {
+          {visibleCategories.map((c) => {
             const on = mark?.category === c;
             return (
               <button

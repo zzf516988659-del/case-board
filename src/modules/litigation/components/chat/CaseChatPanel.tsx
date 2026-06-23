@@ -18,6 +18,9 @@
 
 import {
   memo,
+  type ComponentProps,
+  type MouseEvent as ReactMouseEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -27,8 +30,10 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ArrowDown,
+  ArrowLeft,
   ChevronRight,
   CircleStop,
+  ExternalLink,
   FileText,
   Loader2,
   Paperclip,
@@ -36,6 +41,9 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -47,6 +55,7 @@ import {
   clearChatHistory,
   getCaseWithDocs,
   listChatHistory,
+  openUrl,
 } from "@/lib/api";
 import type { Citation, Document, ToolCallRecord } from "@/lib/types";
 import { confirmDialog } from "@/lib/dialog";
@@ -67,9 +76,15 @@ import {
 } from "./chatRunRegistry";
 /** localStorage key:chat 面板折叠状态。同 key 被 FeedbackButton 读取以避让。 */
 export const CHAT_PANEL_COLLAPSED_KEY = "caseboard.chat-panel.collapsed";
-/** localStorage value 含义:"1"=折叠,"0"=展开。**默认展开**(老板手测反馈)。 */
+/** localStorage value 含义:"1"=折叠,"0"=展开。默认展开。 */
 const COLLAPSED_VALUE = "1";
 const EXPANDED_VALUE = "0";
+/** 主窗口内的展开宽度可拖拽调整并持久化。 */
+export const CHAT_PANEL_WIDTH_KEY = "caseboard.chat-panel.width";
+const CHAT_PANEL_WIDTH_DEFAULT = 420;
+const CHAT_PANEL_WIDTH_MIN = 360;
+const CHAT_PANEL_WIDTH_MAX = 720;
+const CHAT_PANEL_REATTACH_EVENT = "caseboard:chat-window-reattach";
 
 /** 自定义事件名 — 面板折叠状态变化时 dispatch,FeedbackButton 监听以同步位置。 */
 const CHAT_PANEL_TOGGLE_EVENT = "caseboard:chat-panel-toggle";
@@ -192,6 +207,8 @@ interface Props {
    * 隐藏其余民事 chip(法律依据/模拟对抗/类案/深度分析/写起诉状/写证据目录)。默认 "civil"。
    */
   domain?: "civil" | "criminal";
+  /** 分离模式:助手铺满独立界面,不显示折叠、拖宽和再次分离入口。 */
+  detached?: boolean;
 }
 
 export function CaseChatPanel({
@@ -202,18 +219,31 @@ export function CaseChatPanel({
   onBeforeSend,
   onArtifactEdited,
   domain = "civil",
+  detached = false,
 }: Props) {
-  // 默认**展开**(2026-05-27 老板手测反馈:首次进案件没人会主动找折叠按钮)
+  // 分离界面永远完整显示;停靠在主窗口时沿用用户上次的折叠选择。
   const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (detached) return false;
     try {
       return localStorage.getItem(CHAT_PANEL_COLLAPSED_KEY) === COLLAPSED_VALUE;
     } catch {
       return false;
     }
   });
+  const [panelWidth, setPanelWidth] = useState<number>(() => {
+    try {
+      const value = Number(localStorage.getItem(CHAT_PANEL_WIDTH_KEY));
+      return value >= CHAT_PANEL_WIDTH_MIN && value <= CHAT_PANEL_WIDTH_MAX
+        ? value
+        : CHAT_PANEL_WIDTH_DEFAULT;
+    } catch {
+      return CHAT_PANEL_WIDTH_DEFAULT;
+    }
+  });
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [restorePulse, setRestorePulse] = useState(false);
   const [input, setInput] = useState("");
   // V0.3 · 模型调 ask_user 发起的选项式追问;非 null 时在末尾渲染选项卡片。
   // 任何新消息(点选项 / 自己发)开头即清,切案件也清。
@@ -234,6 +264,71 @@ export function CaseChatPanel({
   const scrollerRef = useRef<HTMLDivElement>(null);
   // V0.2.2 · 自由滚动:用户上滚查看历史时停止强制吸底,滚回底部附近再恢复自动跟随
   const [autoScroll, setAutoScroll] = useState(true);
+
+  const refreshHistory = useCallback(async () => {
+    if (!caseId) return;
+    const rows = await listChatHistory(caseId);
+    setHistory(rows);
+  }, [caseId]);
+
+  const startResize = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = panelWidth;
+    let latestWidth = startWidth;
+    const onMove = (moveEvent: MouseEvent) => {
+      latestWidth = Math.min(
+        CHAT_PANEL_WIDTH_MAX,
+        Math.max(
+          CHAT_PANEL_WIDTH_MIN,
+          startWidth + (startX - moveEvent.clientX),
+        ),
+      );
+      setPanelWidth(latestWidth);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try {
+        localStorage.setItem(CHAT_PANEL_WIDTH_KEY, String(latestWidth));
+      } catch {
+        /* ignore quota */
+      }
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
+  const detachChatPanel = async () => {
+    if (!caseId) return;
+    if (isRunning(caseId)) {
+      setError("当前案件的 AI 任务完成后才能切换到独立界面。");
+      return;
+    }
+    try {
+      await invoke("detach_chat_window", {
+        caseId,
+        caseName: caseName ?? null,
+        domain,
+      });
+      setRestorePulse(false);
+      setCollapsed(true);
+    } catch (e) {
+      setError(formatError(e));
+    }
+  };
+
+  const reattachChatPanel = async () => {
+    try {
+      await getCurrentWindow().close();
+    } catch (e) {
+      setError(formatError(e));
+    }
+  };
 
   // V0.2 D6-D7 · attached chip 用,对 caseDocs 按 id 索引
   const attachedDocs = useMemo(() => {
@@ -266,6 +361,30 @@ export function CaseChatPanel({
       /* ignore */
     }
   }, [collapsed]);
+
+  // 分离界面放回侧栏后,同步聊天记录与材料列表。
+  useEffect(() => {
+    if (detached || !caseId) return;
+    let unlisten: UnlistenFn | undefined;
+    let pulseTimer: number | undefined;
+    listen<{ caseId: string }>(CHAT_PANEL_REATTACH_EVENT, (event) => {
+      if (event.payload.caseId !== caseId) return;
+      setCollapsed(false);
+      setRestorePulse(true);
+      void refreshHistory().catch(() => {});
+      onArtifactCreated?.("");
+      if (pulseTimer) window.clearTimeout(pulseTimer);
+      pulseTimer = window.setTimeout(() => setRestorePulse(false), 720);
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch((e) => console.warn("listen chat window restore failed", e));
+    return () => {
+      if (pulseTimer) window.clearTimeout(pulseTimer);
+      unlisten?.();
+    };
+  }, [caseId, detached, onArtifactCreated, refreshHistory]);
 
   // case 切换时重新拉历史 + 拉 case docs(给 AttachmentPicker)+ 清 attached 状态
   useEffect(() => {
@@ -301,6 +420,22 @@ export function CaseChatPanel({
     }
   }, [history.length, streamingText, autoScroll]);
 
+  // 独立窗口与主窗口共用 SQLite;窗口重新获得焦点时拉取最新记录。
+  useEffect(() => {
+    if (!caseId || collapsed) return;
+    const refreshVisibleHistory = () => {
+      if (document.visibilityState === "hidden") return;
+      void refreshHistory().catch(() => {});
+    };
+    window.addEventListener("focus", refreshVisibleHistory);
+    document.addEventListener("visibilitychange", refreshVisibleHistory);
+    refreshVisibleHistory();
+    return () => {
+      window.removeEventListener("focus", refreshVisibleHistory);
+      document.removeEventListener("visibilitychange", refreshVisibleHistory);
+    };
+  }, [caseId, collapsed, refreshHistory]);
+
   // 2026-05-31 · 订阅模块级 run registry:面板(重新)挂载时重连进行中的运行,
   // 运行结束时刷新历史并清除 registry。解决「流式中切走再回来 → 输出消失 + 重复点击出两份」。
   useEffect(() => {
@@ -310,8 +445,7 @@ export function CaseChatPanel({
       const r = getRun(caseId);
       // 运行刚结束 → 刷历史拿落库结果,再清掉 registry(避免残留 streaming UI)
       if (r && r.status === "done") {
-        listChatHistory(caseId)
-          .then((rows) => setHistory(rows))
+        refreshHistory()
           .catch(() => {})
           .finally(() => clearRun(caseId));
       }
@@ -319,7 +453,7 @@ export function CaseChatPanel({
     // 挂载即重渲染一次,显示可能已在进行的运行
     forceRerender((n) => n + 1);
     return unsub;
-  }, [caseId]);
+  }, [caseId, refreshHistory]);
 
   const disabled = !caseId || isStreaming;
 
@@ -439,14 +573,21 @@ export function CaseChatPanel({
     }
   }
 
-  // ── 折叠态 ────────────────────────────────────────────────
-  // 折叠/展开用同一个 aside,宽度在 w-8 ↔ w-420px 之间平滑过渡 → 编辑器主区宽度不再瞬跳。
+  // 折叠、拖宽和独立窗口共用同一个面板主体。
   return (
     <aside
       className={cn(
-        "flex h-full shrink-0 flex-col border-l border-border bg-card/30 transition-[width] duration-300 ease-out",
-        collapsed ? "w-12 items-center" : "w-[420px]",
+        "relative flex h-full shrink-0 flex-col border-border bg-card/30 transition-[width,box-shadow,background-color] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
+        detached
+          ? "w-full border-l-0"
+          : collapsed
+            ? "w-12 items-center border-l"
+            : "border-l",
+        restorePulse &&
+          !detached &&
+          "bg-sky-50/55 shadow-[-12px_0_28px_-24px_rgba(14,165,233,0.95)] dark:bg-sky-950/20",
       )}
+      style={!detached && !collapsed ? { width: panelWidth } : undefined}
     >
       {collapsed ? (
         <button
@@ -466,8 +607,16 @@ export function CaseChatPanel({
         </button>
       ) : (
         <>
-      {/* Header */}
-      <header className="flex items-center justify-between border-b border-border px-3 py-2.5">
+          {!detached && (
+            <div
+              onMouseDown={startResize}
+              className="absolute left-0 top-0 z-20 h-full w-1 cursor-col-resize bg-transparent transition-colors hover:bg-primary/30"
+              title="拖动调整宽度"
+              aria-hidden
+            />
+          )}
+          {/* Header */}
+          <header className="flex items-center justify-between border-b border-border px-3 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
           <Sparkles className="size-4 shrink-0 text-foreground" />
           <h2 className="truncate text-sm font-medium text-foreground">
@@ -490,15 +639,44 @@ export function CaseChatPanel({
           >
             <Trash2 className="size-3.5" />
           </button>
-          <button
-            type="button"
-            onClick={() => setCollapsed(true)}
-            className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            title="收起面板"
-            aria-label="收起面板"
-          >
-            <ChevronRight className="size-3.5" />
-          </button>
+          {!detached && caseId && (
+            <button
+              type="button"
+              onClick={detachChatPanel}
+              disabled={isStreaming}
+              className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+              title={
+                isStreaming
+                  ? "当前任务完成后可独立显示"
+                  : "独立显示(可最大化或拖到外接屏)"
+              }
+              aria-label="将 AI 助手独立显示"
+            >
+              <ExternalLink className="size-3.5" />
+            </button>
+          )}
+          {!detached && (
+            <button
+              type="button"
+              onClick={() => setCollapsed(true)}
+              className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              title="收起面板"
+              aria-label="收起面板"
+            >
+              <ChevronRight className="size-3.5" />
+            </button>
+          )}
+          {detached && (
+            <button
+              type="button"
+              onClick={reattachChatPanel}
+              className="ml-1 inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+              title="把 AI 助手重新停靠到案件页右侧"
+            >
+              <ArrowLeft className="size-3.5" />
+              放回侧栏
+            </button>
+          )}
         </div>
       </header>
 
@@ -843,11 +1021,101 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: ChatMessage })
 
 const MarkdownView = memo(function MarkdownView({ text }: { text: string }) {
   return (
-    <div className="prose prose-sm min-w-0 max-w-none break-words text-sm leading-relaxed [&_h1]:mt-1 [&_h1]:mb-1 [&_h2]:mt-2 [&_h2]:mb-1 [&_h3]:mt-1.5 [&_h3]:mb-1 [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_table]:my-1 [&_table]:block [&_table]:overflow-x-auto [&_table]:text-xs [&_code]:break-words [&_code]:bg-accent [&_code]:px-1 [&_code]:rounded [&_pre]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-accent/60 [&_pre]:p-2 [&_pre]:text-xs [&_pre_code]:break-normal [&_pre_code]:whitespace-pre">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    <div
+      className={cn(
+        "min-w-0 max-w-none break-words font-sans text-sm leading-[1.7] text-foreground",
+        "[&_h1]:mb-3 [&_h1]:mt-1 [&_h1]:text-center [&_h1]:text-xl [&_h1]:font-semibold",
+        "[&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:border-b [&_h2]:border-border [&_h2]:pb-1.5 [&_h2]:text-base [&_h2]:font-semibold",
+        "[&_h3]:mb-1.5 [&_h3]:mt-3 [&_h3]:text-[15px] [&_h3]:font-semibold",
+        "[&_h4]:mb-1 [&_h4]:mt-2.5 [&_h4]:text-sm [&_h4]:font-semibold",
+        "[&_p]:my-2",
+        "[&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5",
+        "[&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5",
+        "[&_li]:my-1 [&_li>p]:my-1",
+        "[&_blockquote]:my-3 [&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
+        "[&_hr]:my-4 [&_hr]:border-border",
+        "[&_strong]:font-semibold",
+        "[&_pre]:my-3 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-border [&_pre]:bg-muted/60 [&_pre]:p-3 [&_pre]:text-xs [&_pre]:leading-relaxed",
+        "[&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[12px]",
+        "[&_pre_code]:whitespace-pre [&_pre_code]:bg-transparent [&_pre_code]:p-0",
+        "[&_img]:max-w-full",
+      )}
+    >
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {text}
+      </ReactMarkdown>
     </div>
   );
 });
+
+type MarkdownComponents = ComponentProps<typeof ReactMarkdown>["components"];
+
+const markdownComponents: MarkdownComponents = {
+  a({ children, href, ...props }) {
+    return (
+      <a
+        {...props}
+        href={href}
+        className="text-foreground underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground"
+        onClick={(event) => {
+          event.preventDefault();
+          if (!href) return;
+          void openUrl(href).catch((e) =>
+            console.warn("open markdown link failed", e),
+          );
+        }}
+      >
+        {children}
+      </a>
+    );
+  },
+  table({ children, ...props }) {
+    return (
+      <div className="my-3 w-full overflow-x-auto rounded-md border border-border bg-background">
+        <table
+          {...props}
+          className="w-full min-w-max border-collapse text-left text-[13px] leading-relaxed"
+        >
+          {children}
+        </table>
+      </div>
+    );
+  },
+  thead({ children, ...props }) {
+    return (
+      <thead {...props} className="bg-muted/70">
+        {children}
+      </thead>
+    );
+  },
+  th({ children, ...props }) {
+    return (
+      <th
+        {...props}
+        className="border-b border-r border-border px-3 py-2 text-center text-label font-semibold text-muted-foreground last:border-r-0"
+      >
+        {children}
+      </th>
+    );
+  },
+  td({ children, ...props }) {
+    return (
+      <td
+        {...props}
+        className="border-b border-r border-border px-3 py-2 align-top last:border-r-0 [&_p]:my-1"
+      >
+        {children}
+      </td>
+    );
+  },
+  tr({ children, ...props }) {
+    return (
+      <tr {...props} className="last:[&_td]:border-b-0 last:[&_th]:border-b-0">
+        {children}
+      </tr>
+    );
+  },
+};
 
 // 把交错 segments 渲染成:text 段 → MarkdownView,连续 tool 段合并成一个 ToolCallTrace
 // (同一轮的多个工具显示在一个 trace 框里)。live 时最后一组 trace 显示「正在思考下一步」。

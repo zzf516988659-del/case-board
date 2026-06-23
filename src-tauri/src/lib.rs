@@ -9,11 +9,13 @@ pub mod diagnostic_log;
 pub mod doc_search;
 pub mod docx_extract;
 pub mod docx_filing;
+pub mod element_convert;
 pub mod embedding;
 pub mod export;
 pub mod express;
 pub mod feedback;
 pub mod feishu;
+pub mod feishu_reminder;
 pub mod ingest;
 pub mod lifecycle;
 pub mod llm;
@@ -38,9 +40,10 @@ use tauri::{path::BaseDirectory, Emitter, Manager};
 
 use crate::db::cases::{self as cases_db, Case};
 use crate::db::documents::{self as documents_db, Document};
+use crate::element_convert::*;
 use crate::ingest::case_split;
 use crate::ingest::pipeline;
-use crate::ingest::scanner::{scan_folder, ScannedDoc};
+use crate::ingest::scanner::{scan_folder, scan_folder_with_options, ScanOptions, ScannedDoc};
 
 // ============================================================================
 // 公共类型
@@ -545,7 +548,7 @@ async fn verify_openai_compat_key(
 /// 2026-05-25 V0.1.8 · 检测版本更新。
 ///
 /// 前端启动时调一次(静默,失败不报错),设置页「检查更新」按钮也调。
-/// 数据源:lawtools.top 仓库的 version.json。返回 UpdateInfo 给前端判断是否弹提示。
+/// 数据源:官网公开的 version.json。返回 UpdateInfo 给前端判断是否弹提示。
 #[tauri::command]
 async fn check_for_update() -> update::UpdateInfo {
     update::check_for_update().await
@@ -888,40 +891,133 @@ async fn ai_organize_inner(pool: &SqlitePool, case_id: &str) -> Result<usize, St
             }
         })
         .collect();
-    let results = llm::organize::classify_documents(&config, &inputs)
-        .await
-        .map_err(|e| format!("AI 整理失败:{e}"))?;
     let valid_ids: std::collections::HashSet<&str> = active.iter().map(|d| d.id.as_str()).collect();
     let mut n = 0usize;
-    for r in &results {
-        if !valid_ids.contains(r.id.as_str()) {
-            continue; // AI 回了不存在的 id,跳过
+    let batches = llm::organize::prepare_batches(&inputs);
+    for (batch_index, batch) in batches.iter().enumerate() {
+        let mut last_error = None;
+        let mut restored = None;
+        for _attempt in 0..2 {
+            match llm::organize::classify_documents(&config, &batch.docs).await {
+                Ok(results) => match llm::organize::restore_batch_ids(batch, results) {
+                    Ok(results) => {
+                        restored = Some(results);
+                        break;
+                    }
+                    Err(error) => last_error = Some(error.to_string()),
+                },
+                Err(error) => last_error = Some(error.to_string()),
+            }
         }
-        // importance:重要/忽略 才写;"普通" = 不打标(也不动人工标记)
-        if r.importance == "重要" || r.importance == "忽略" {
+        let results = restored.ok_or_else(|| {
+            format!(
+                "AI 整理第 {}/{} 批失败（已完成 {} 份）:{}",
+                batch_index + 1,
+                batches.len(),
+                n,
+                last_error.unwrap_or_else(|| "未知错误".into())
+            )
+        })?;
+        for r in &results {
+            if !valid_ids.contains(r.id.as_str()) {
+                continue; // AI 回了不存在的 id,跳过
+            }
+            // importance:重要/忽略 才写;"普通" = 不打标(也不动人工标记)
+            if r.importance == "重要" || r.importance == "忽略" {
+                let _ = db::document_tags::set_ai_suggestion(
+                    pool,
+                    &r.id,
+                    db::document_tags::NS_IMPORTANCE,
+                    &r.importance,
+                )
+                .await;
+            }
+            // category:六选一(非法值 set_ai_suggestion 内部会报错 → 忽略该项)
             let _ = db::document_tags::set_ai_suggestion(
                 pool,
                 &r.id,
-                db::document_tags::NS_IMPORTANCE,
-                &r.importance,
+                db::document_tags::NS_CATEGORY,
+                &r.category,
             )
             .await;
+            // 显示名建议:仅当无人工改名时写(set_ai_display_name 内部保证人工永优先;空名跳过)
+            if let Some(name) = r.name.as_deref() {
+                let _ = documents_db::set_ai_display_name(pool, &r.id, name).await;
+            }
+            n += 1;
         }
-        // category:六选一(非法值 set_ai_suggestion 内部会报错 → 忽略该项)
-        let _ = db::document_tags::set_ai_suggestion(
-            pool,
-            &r.id,
-            db::document_tags::NS_CATEGORY,
-            &r.category,
-        )
-        .await;
-        // 显示名建议:仅当无人工改名时写(set_ai_display_name 内部保证人工永优先;空名跳过)
-        if let Some(name) = r.name.as_deref() {
-            let _ = documents_db::set_ai_display_name(pool, &r.id, name).await;
-        }
-        n += 1;
     }
     Ok(n)
+}
+
+#[tauri::command]
+async fn list_case_logs(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::case_logs::CaseLog>, String> {
+    db::case_logs::list(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn create_case_log(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    occurred_at: String,
+    raw_input: String,
+    organized_markdown: Option<String>,
+) -> Result<db::case_logs::CaseLog, String> {
+    db::case_logs::create(
+        pool.inner(),
+        &case_id,
+        &occurred_at,
+        &raw_input,
+        organized_markdown.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn organize_case_log(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    raw_input: String,
+) -> Result<String, String> {
+    if raw_input.trim().is_empty() {
+        return Err("工作记录不能为空".into());
+    }
+    let case = cases_db::get_case(pool.inner(), &case_id)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| "案件不存在".to_string())?;
+    let recent = db::case_logs::list(pool.inner(), &case_id).await?;
+    let recent = recent
+        .iter()
+        .take(5)
+        .map(|log| {
+            format!(
+                "- {}: {}",
+                log.occurred_at,
+                log.content.chars().take(300).collect::<String>()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = format!(
+        "案件:{}\n案由:{}\n案号:{}\n当前状态:{}\n案件概况:{}\n最近记录:\n{}",
+        case.name,
+        case.cause.or(case.agg_cause).unwrap_or_default(),
+        case.case_no.or(case.agg_case_no).unwrap_or_default(),
+        case.workflow_status
+            .or(case.agg_status_text)
+            .unwrap_or_default(),
+        case.case_summary.unwrap_or_default(),
+        recent
+    );
+    let settings = settings::read_settings().map_err(|e| e.to_string())?;
+    let config = llm::LlmConfig::from_settings(&settings);
+    llm::work_log::organize(&config, &context, &raw_input)
+        .await
+        .map_err(|e| format!("AI 整理失败:{e}"))
 }
 
 // ===== 独立日历日程(2026-06-14;不绑案件,首页日历右键添加 / 删除) =====
@@ -974,6 +1070,12 @@ async fn fetch_feishu_calendar(
 async fn find_feishu_case_path(event_summary: String) -> Result<Option<String>, String> {
     let settings = settings::read_settings()?;
     feishu::find_case_local_path(&settings, &event_summary).await
+}
+
+/// 测试飞书群机器人 Webhook；发送一条不含案件信息的测试消息。
+#[tauri::command]
+async fn test_feishu_webhook(url: String) -> Result<(), String> {
+    feishu_reminder::test_webhook(&url).await
 }
 
 // ============================================================================
@@ -2549,7 +2651,7 @@ async fn start_court_filing(
         "original_case_number": original_case_number.as_deref().unwrap_or(""),
     });
 
-    // 解析当事人 JSON（兼容字符串数组 ["潘尖"] 和对象数组 [{name:"潘尖"}]）
+    // 解析当事人 JSON（兼容字符串数组 ["张三"] 和对象数组 [{name:"张三"}]）
     for (key, field) in [
         ("plaintiffs", &case.agg_plaintiffs),
         ("defendants", &case.agg_defendants),
@@ -3976,6 +4078,7 @@ async fn refresh_case_files(
     app: tauri::AppHandle,
     pool: tauri::State<'_, SqlitePool>,
     case_id: String,
+    reference_materials: Option<bool>,
 ) -> Result<documents_db::SyncStats, String> {
     // 1) 拿案件 + source_folder
     let case = cases_db::get_case(pool.inner(), &case_id)
@@ -3992,7 +4095,12 @@ async fn refresh_case_files(
     }
 
     // 2) 扫文件夹(scanner 很快,同步即可)
-    let scanned = scan_folder(folder);
+    let scanned = scan_folder_with_options(
+        folder,
+        ScanOptions {
+            reference_materials: reference_materials.unwrap_or(false),
+        },
+    );
 
     // 3) diff sync,拿统计
     let stats = documents_db::sync_documents_for_case(pool.inner(), &case_id, &scanned)
@@ -4024,6 +4132,58 @@ async fn refresh_case_files(
         );
     }
 
+    Ok(stats)
+}
+
+/// 源根目录被移动/改名后重新关联。先扫描并复用文档移动识别，成功后再更新案件根路径。
+#[tauri::command]
+async fn relink_case_folder(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    new_folder: String,
+    reference_materials: Option<bool>,
+) -> Result<documents_db::SyncStats, String> {
+    let folder = Path::new(&new_folder);
+    if !folder.is_dir() {
+        return Err(format!("选择的路径不是可用文件夹: {new_folder}"));
+    }
+    let occupied: Option<String> =
+        sqlx::query_scalar("SELECT id FROM cases WHERE source_folder = ? AND id != ?")
+            .bind(&new_folder)
+            .bind(&case_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(db_err)?;
+    if occupied.is_some() {
+        return Err("该文件夹已经关联到另一个案件".into());
+    }
+
+    let scanned = scan_folder_with_options(
+        folder,
+        ScanOptions {
+            reference_materials: reference_materials.unwrap_or(false),
+        },
+    );
+    let stats = documents_db::sync_documents_for_case(pool.inner(), &case_id, &scanned)
+        .await
+        .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE cases SET source_folder = ?, last_scanned_at = datetime('now'), \
+         updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&new_folder)
+    .bind(&case_id)
+    .execute(pool.inner())
+    .await
+    .map_err(db_err)?;
+
+    if stats.added > 0 || stats.updated > 0 || stats.deleted > 0 {
+        let documents = documents_db::list_documents_by_case(pool.inner(), &case_id)
+            .await
+            .map_err(db_err)?;
+        pipeline::spawn_extraction(app, pool.inner().clone(), case_id, documents, true);
+    }
     Ok(stats)
 }
 
@@ -4405,6 +4565,74 @@ async fn case_chat(
     input: chat::CaseChatInput,
 ) -> Result<chat::CaseChatResult, String> {
     chat::case_chat_impl(app, pool.inner(), registry.inner(), input).await
+}
+
+/// 把案件 AI 助手从主窗口侧栏分离成独立界面,共享同一份本地聊天记录。
+/// 同一 case_id 已分离时直接聚焦,避免生成第二个实例。
+#[tauri::command]
+fn detach_chat_window(
+    app: tauri::AppHandle,
+    case_id: String,
+    case_name: Option<String>,
+    domain: Option<String>,
+) -> Result<(), String> {
+    let label = format!("chat-{}", case_id);
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.set_focus();
+        return Ok(());
+    }
+
+    let route = detached_chat_route(&case_id, case_name.as_deref(), domain.as_deref());
+    let url = tauri::WebviewUrl::App(route.into());
+    let title = match &case_name {
+        Some(name) => format!("案件 AI 助手 · {}", name),
+        None => "案件 AI 助手".to_string(),
+    };
+
+    let win = tauri::WebviewWindowBuilder::new(&app, label, url)
+        .title(title)
+        .inner_size(600.0, 780.0)
+        .min_inner_size(420.0, 500.0)
+        .resizable(true)
+        .focused(true)
+        .center()
+        .build()
+        .map_err(|e| format!("AI 助手切换到独立界面失败: {}", e))?;
+    let app_for_close = app.clone();
+    let case_id_for_close = case_id.clone();
+    win.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            let _ = app_for_close.emit_to(
+                "main",
+                "caseboard:chat-window-reattach",
+                serde_json::json!({ "caseId": case_id_for_close }),
+            );
+        }
+    });
+    Ok(())
+}
+
+fn detached_chat_route(case_id: &str, case_name: Option<&str>, domain: Option<&str>) -> String {
+    format!(
+        "index.html?window=chat&caseId={}&caseName={}&domain={}",
+        url_encode(case_id),
+        case_name.map(url_encode).unwrap_or_default(),
+        url_encode(domain.unwrap_or("civil")),
+    )
+}
+
+/// 简易 URL 百分号编码(query 用):保留 `A-Za-z0-9-_.~`,其余字节 `%HH`。
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 /// 取案件聊天历史(升序,前端直接渲染)。
@@ -5256,6 +5484,7 @@ pub fn run() {
 
             // 团队版:已配置团队 → 后台启动监听+广播+周期同步(失败只记日志不阻启动)
             let team_pool = pool.clone();
+            let feishu_reminder_pool = pool.clone();
             app.manage(pool);
             // chat 模块全局 cancel 注册表(V0.1.13+)
             app.manage(chat::ChatCancelRegistry::default());
@@ -5299,6 +5528,9 @@ pub fn run() {
 
             // 滴答清单后台自动同步(每 60s 一拍;仅在已连接 + 开了自动同步时才真同步)。
             ticktick::spawn_auto_sync(app.handle().clone());
+
+            // 飞书手机每日提醒（默认关闭；开启后每分钟检查一次，成功发送按日期持久化去重）。
+            feishu_reminder::spawn_scheduler(feishu_reminder_pool);
 
             Ok(())
         })
@@ -5346,11 +5578,15 @@ pub fn run() {
             add_document_bookmark,
             delete_document_bookmark,
             ai_organize_case,
+            list_case_logs,
+            create_case_log,
+            organize_case_log,
             add_calendar_event,
             list_calendar_events,
             delete_calendar_event,
             fetch_feishu_calendar,
             find_feishu_case_path,
+            test_feishu_webhook,
             start_court_filing,
             submit_captcha_answer,
             list_court_filing_jobs,
@@ -5373,6 +5609,7 @@ pub fn run() {
             export_report_docx,
             recompute_case_extraction,
             refresh_case_files,
+            relink_case_folder,
             preview_court_sms,
             ingest_court_sms,
             query_express,
@@ -5416,8 +5653,15 @@ pub fn run() {
             contract_draft::add_contract_preference,
             contract_draft::list_contract_preferences,
             contract_draft::delete_contract_preference,
+            list_element_document_types,
+            generate_element_document,
+            save_element_document,
+            export_element_document,
+            save_external_element_document,
+            save_element_docx_to_path,
             save_editor_doc,
             case_chat,
+            detach_chat_window,
             list_chat_history,
             cancel_chat,
             clear_chat_history,
@@ -5460,8 +5704,9 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             match event {
-                // App 退出时清理子进程(llama-server)
-                tauri::WindowEvent::Destroyed => lifecycle::shutdown(),
+                // 仅主窗口销毁才视为 App 退出。独立 AI 助手窗口关闭时不能误杀
+                // llama-server 等生命周期子进程。
+                tauri::WindowEvent::Destroyed if window.label() == "main" => lifecycle::shutdown(),
                 // 切回 App(窗口重新获得焦点)→ 触发一次滴答同步(已连接 + 开了自动同步才真跑)。
                 tauri::WindowEvent::Focused(true) => {
                     ticktick::sync_on_focus(window.app_handle().clone());

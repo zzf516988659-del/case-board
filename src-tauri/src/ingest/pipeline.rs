@@ -835,6 +835,8 @@ pub(crate) fn is_archival_category(cat: Option<&str>) -> bool {
             | Some("收案登记表")
             // 律师内部
             | Some("办案笔记")
+            // 参考案例/参考判决只供手工查阅引用，不能混进本案事实
+            | Some("参考材料")
             // 身份隐私
             | Some("身份证")
             | Some("户口")

@@ -48,9 +48,11 @@ import {
   yuandianFullReport,
 } from "@/lib/api";
 import { getFieldOverride, parseOverrides } from "@/lib/userOverrides";
+import { useFeatureFlag } from "@/lib/featureFlags";
 import { TodosCard } from "@/components/TodosCard";
 import { useRunningTask } from "@/contexts/RunningTaskContext";
 import type { InterestPrefill } from "@/modules/tools/calculators/InterestCalculator";
+import { CaseWorkLogSection } from "@/modules/litigation/components/CaseWorkLogSection";
 
 export function ExecutionDetailView({
   caseData,
@@ -72,6 +74,8 @@ export function ExecutionDetailView({
   const [fullReportOpen, setFullReportOpen] = useState(false);
   // 还款记录
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [showTodos] = useFeatureFlag("case_todos");
+  const [showWorkLogs] = useFeatureFlag("case_work_logs");
 
   // 2026-05-25 V0.1.7 · 全局任务锁,所有长任务走这条
   const { task, runWithLock } = useRunningTask();
@@ -649,10 +653,16 @@ export function ExecutionDetailView({
             onDelete={handleDeletePayment}
           />
 
-          {/* 待办清单(胡彬律师反馈) */}
-          <Card title="待办清单">
-            <TodosCard caseId={current.id} />
-          </Card>
+          {(showTodos || showWorkLogs) && (
+            <div className="space-y-4">
+              {showTodos && (
+                <Card title="待办清单">
+                  <TodosCard caseId={current.id} />
+                </Card>
+              )}
+              {showWorkLogs && <CaseWorkLogSection caseId={current.id} />}
+            </div>
+          )}
         </div>
       </div>
 

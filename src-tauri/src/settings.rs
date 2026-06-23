@@ -203,6 +203,14 @@ pub struct Settings {
     pub feishu_app_token: Option<String>,
     /// (可选)飞书"案件池"多维表格 Table ID(配合 app_token)。
     pub feishu_cases_table_id: Option<String>,
+    /// 飞书机器人每日手机提醒开关。独立于日历读取；默认关闭，不影响未配置用户。
+    pub feishu_reminder_enabled: Option<bool>,
+    /// 飞书群自定义机器人 Webhook URL，只存本机 settings.json。
+    pub feishu_webhook_url: Option<String>,
+    /// 每日推送时间，格式 HH:MM。
+    pub feishu_reminder_time: Option<String>,
+    /// 提前汇总未来多少天的到期事项。
+    pub feishu_reminder_days: Option<u32>,
 
     // ===== 2026-06-17 辅助在线立案(整合外部贡献 PR #8,gcheng-001)=====
     /// 立案 CLI 包根目录。None = 用应用内置 standalone/court_filing_cli(打包进 resources)。
@@ -454,6 +462,11 @@ impl Settings {
             chat_context_budget_history: self.chat_context_budget_history.or(Some(40_000)),
             chat_loop_max_iters: self.chat_loop_max_iters.or(Some(16)),
             chat_max_attached: self.chat_max_attached.or(Some(5)),
+            feishu_reminder_enabled: self.feishu_reminder_enabled.or(Some(false)),
+            feishu_reminder_time: self
+                .feishu_reminder_time
+                .or_else(|| Some("09:00".to_string())),
+            feishu_reminder_days: self.feishu_reminder_days.or(Some(7)),
             ..self
         }
     }

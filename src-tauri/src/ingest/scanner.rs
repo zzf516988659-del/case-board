@@ -30,6 +30,11 @@ pub struct ScannedDoc {
     pub modified_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanOptions {
+    pub reference_materials: bool,
+}
+
 /// 这些**文件名**直接忽略(macOS/Windows 噪音)
 const IGNORED_FILES: &[&str] = &[".DS_Store", "Thumbs.db", "desktop.ini", ".gitkeep"];
 
@@ -327,6 +332,10 @@ fn is_ai_artifact(filename: &str) -> bool {
 ///
 /// 不读取文件内容,纯元数据 + 文件名规则。
 pub fn scan_folder(root: &Path) -> Vec<ScannedDoc> {
+    scan_folder_with_options(root, ScanOptions::default())
+}
+
+pub fn scan_folder_with_options(root: &Path, options: ScanOptions) -> Vec<ScannedDoc> {
     let mut docs = Vec::new();
 
     let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
@@ -356,11 +365,22 @@ pub fn scan_folder(root: &Path) -> Vec<ScannedDoc> {
             dt.to_rfc3339()
         });
 
+        let reference = options.reference_materials
+            && path.components().any(|component| {
+                let segment = component.as_os_str().to_string_lossy();
+                ["参考材料", "参考文件", "参考案例", "类案", "检索材料"]
+                    .iter()
+                    .any(|keyword| segment.contains(keyword))
+            });
         docs.push(ScannedDoc {
             source_path: path.to_string_lossy().to_string(),
             filename: filename.clone(),
             stage: classify_stage(path),
-            category: classify_category(&filename),
+            category: if reference {
+                Some("参考材料".into())
+            } else {
+                classify_category(&filename)
+            },
             is_ai_artifact: is_ai_artifact(&filename),
             size_bytes,
             modified_at,

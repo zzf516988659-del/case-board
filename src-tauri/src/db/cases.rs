@@ -281,10 +281,18 @@ pub async fn set_summary_if_empty(
 
 /// 删除一个案件(级联删除所有关联表:documents/events/contacts/...)。
 pub async fn delete_case(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    // migration 0029 的 court_filing_jobs 是当前唯一没有 ON DELETE 动作的案件子表。
+    // 其余子表继续交给各自的 CASCADE / SET NULL 约束，避免手写表清单改变既有语义。
+    sqlx::query("DELETE FROM court_filing_jobs WHERE case_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM cases WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

@@ -482,6 +482,14 @@ export interface Settings {
   feishu_app_token: string | null;
   /** (可选)飞书"案件池"多维表格 Table ID。 */
   feishu_cases_table_id: string | null;
+  /** 飞书群机器人每日手机提醒开关；独立于日历读取，默认关闭。 */
+  feishu_reminder_enabled: boolean | null;
+  /** 飞书群自定义机器人 Webhook URL，只存本机。 */
+  feishu_webhook_url: string | null;
+  /** 每日推送时间，格式 HH:MM。 */
+  feishu_reminder_time: string | null;
+  /** 提前汇总未来多少天的到期事项。 */
+  feishu_reminder_days: number | null;
 
   // ===== 2026-06-17 辅助在线立案(整合外部贡献 PR #8) =====
   /** 立案 CLI 包根目录。null = 用应用内置 standalone/court_filing_cli。 */
@@ -947,3 +955,71 @@ export type DocOcrStatusEvent = Extract<
   ProgressEvent,
   { stage: "doc_ocr_status" }
 >;
+
+/* ------------------------------------------------------------------ */
+/* 要素式文书                                                        */
+/* ------------------------------------------------------------------ */
+
+export interface ElementFieldDefinition {
+  key: string;
+  label: string;
+  required: boolean;
+}
+
+export interface ElementDocumentType {
+  id: string;
+  name: string;
+  category: string;
+  quality_level: "refined" | "review_required";
+  template_version: string;
+  fields: ElementFieldDefinition[];
+}
+
+export interface ElementFieldValue {
+  key: string;
+  label: string;
+  value: string;
+  evidence: string;
+  confidence: number;
+  required: boolean;
+}
+
+export interface ElementDraft {
+  template_id: string;
+  document_type: string;
+  title: string;
+  quality_level: string;
+  template_version: string;
+  fields: ElementFieldValue[];
+  missing_required: string[];
+  input_truncated: boolean;
+  processor_notice: string;
+}
+
+export interface ExternalElementResult {
+  filename: string;
+  data_base64: string;
+  preview_text: string;
+}
+
+export interface SavedElementDocument {
+  doc_id: string;
+  path: string;
+}
+
+export interface CaseLog {
+  id: string;
+  case_id: string;
+  occurred_at: string;
+  content: string;
+  source: "manual" | "ai" | null;
+  source_doc_id: string | null;
+  created_at: string;
+}
+
+export interface ElementConvertProgress {
+  stage: "auth" | "upload" | "convert" | "generate" | "download" | "done" | "error";
+  message: string;
+  percent: number;
+  elapsed_ms: number;
+}

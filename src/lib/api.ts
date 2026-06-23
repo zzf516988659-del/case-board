@@ -8,6 +8,12 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  CaseLog,
+  ElementDocumentType,
+  ElementDraft,
+  SavedElementDocument,
+} from "./types";
 
 import type {
   Case,
@@ -262,7 +268,7 @@ export function verifyYuandianKey(apiKey: string): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_yuandian_key", { apiKey });
 }
 
-/** 2026-05-25 V0.1.8:检测远程最新版本(lawtools.top 仓库的 version.json)。
+/** 2026-05-25 V0.1.8:检测远程最新版本(官网公开的 version.json)。
  *  失败时 has_update=false + error 字段填上原因,前端可静默忽略。*/
 export function checkForUpdate(): Promise<UpdateInfo> {
   return invoke<UpdateInfo>("check_for_update");
@@ -709,6 +715,11 @@ export function findFeishuCasePath(eventSummary: string): Promise<string | null>
   return invoke<string | null>("find_feishu_case_path", { eventSummary });
 }
 
+/** 发送一条不含案件信息的飞书机器人测试消息。 */
+export function testFeishuWebhook(url: string): Promise<void> {
+  return invoke<void>("test_feishu_webhook", { url });
+}
+
 /* ------------------------------------------------------------------ */
 /* 法院一张网在线立案(2026-06-17 · 整合外部贡献 PR #8)                   */
 /* ------------------------------------------------------------------ */
@@ -1082,10 +1093,22 @@ export interface SyncStats {
   updated: number;
   unchanged: number;
   deleted: number;
+  moved: number;
 }
 
-export function refreshCaseFiles(caseId: string): Promise<SyncStats> {
-  return invoke<SyncStats>("refresh_case_files", { caseId });
+export function refreshCaseFiles(
+  caseId: string,
+  referenceMaterials = false,
+): Promise<SyncStats> {
+  return invoke<SyncStats>("refresh_case_files", { caseId, referenceMaterials });
+}
+
+export function relinkCaseFolder(
+  caseId: string,
+  newFolder: string,
+  referenceMaterials = false,
+): Promise<SyncStats> {
+  return invoke<SyncStats>("relink_case_folder", { caseId, newFolder, referenceMaterials });
 }
 
 /* ───────────── 法院短信处理(V0.3 · 一张网 zxfw.court.gov.cn) ───────────── */
@@ -1920,4 +1943,86 @@ export function listContractPreferences(): Promise<ContractPreference[]> {
 /** 删除一条起草偏好。 */
 export function deleteContractPreference(id: string): Promise<number> {
   return invoke<number>("delete_contract_preference", { id });
+}
+
+export function listCaseLogs(caseId: string): Promise<CaseLog[]> {
+  return invoke<CaseLog[]>("list_case_logs", { caseId });
+}
+
+export function createCaseLog(
+  caseId: string,
+  occurredAt: string,
+  rawInput: string,
+  organizedMarkdown: string | null,
+): Promise<CaseLog> {
+  return invoke<CaseLog>("create_case_log", {
+    caseId,
+    occurredAt,
+    rawInput,
+    organizedMarkdown,
+  });
+}
+
+export function organizeCaseLog(caseId: string, rawInput: string): Promise<string> {
+  return invoke<string>("organize_case_log", { caseId, rawInput });
+}
+
+/* ------------------------------------------------------------------ */
+/* 要素式文书                                                        */
+/* ------------------------------------------------------------------ */
+
+export function listElementDocumentTypes(): Promise<ElementDocumentType[]> {
+  return invoke<ElementDocumentType[]>("list_element_document_types");
+}
+
+export function generateElementDocument(
+  sourcePath: string,
+  extractedTextPath: string | null,
+  templateId: string,
+): Promise<ElementDraft> {
+  return invoke<ElementDraft>("generate_element_document", {
+    sourcePath,
+    extractedTextPath,
+    templateId,
+  });
+}
+
+export function saveElementDocument(
+  caseId: string,
+  templateId: string,
+  title: string,
+  fields: ElementDraft["fields"],
+): Promise<SavedElementDocument> {
+  return invoke<SavedElementDocument>("save_element_document", {
+    caseId,
+    templateId,
+    title,
+    fields,
+  });
+}
+
+export function exportElementDocument(
+  templateId: string,
+  title: string,
+  fields: ElementDraft["fields"],
+  savePath: string,
+): Promise<string> {
+  return invoke<string>("export_element_document", { templateId, title, fields, savePath });
+}
+
+export function saveExternalElementDocument(
+  caseId: string,
+  filename: string,
+  dataBase64: string,
+): Promise<SavedElementDocument> {
+  return invoke<SavedElementDocument>("save_external_element_document", {
+    caseId,
+    filename,
+    dataBase64,
+  });
+}
+
+/** 工具页(无案件):把外部转换的 base64 docx 写到用户选择的路径(由 Rust 写,绕过前端 fs scope)。 */
+export function saveElementDocxToPath(savePath: string, dataBase64: string): Promise<string> {
+  return invoke<string>("save_element_docx_to_path", { savePath, dataBase64 });
 }

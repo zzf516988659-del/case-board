@@ -1,8 +1,7 @@
 /**
- * 飞书日历配置(整合外部贡献 PR #9,gcheng-001;2026-06-17)。
+ * 飞书联动配置：日历读取整合自外部贡献 PR #9；手机提醒整合自 PR #22。
  *
- * 在这里打开「飞书日历」并填配置;开启且连接成功后,首页会用飞书月历替代本地「日程日历」卡。
- * 复用本机 lark-cli 的登录态,CaseBoard **不保存飞书 token**。
+ * 日历读取复用本机 lark-cli 登录态；每日提醒使用用户自行创建的飞书群机器人 Webhook。
  *
  * 依赖(诚实标明,装不上属正常):
  *   1. 本机装好飞书官方 `lark-cli` 并 `lark-cli login`(macOS / Windows / Linux 都有);
@@ -10,16 +9,23 @@
  */
 import { useEffect, useState } from "react";
 import {
+  BellRing,
   CalendarClock,
   Loader2,
   Save,
+  Send,
   CheckCircle2,
   AlertTriangle,
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
 
-import { getSettings, saveSettings, fetchFeishuCalendar } from "@/lib/api";
+import {
+  fetchFeishuCalendar,
+  getSettings,
+  saveSettings,
+  testFeishuWebhook,
+} from "@/lib/api";
 import type { Settings } from "@/lib/types";
 import { toast } from "@/components/ui/toast";
 
@@ -38,12 +44,20 @@ export function FeishuCalendarTool() {
   const [appToken, setAppToken] = useState("");
   const [tableId, setTableId] = useState("");
   const [poolOpen, setPoolOpen] = useState(false);
+  const [reminderEnabled, setReminderEnabled] = useState(false);
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [reminderTime, setReminderTime] = useState("09:00");
+  const [reminderDays, setReminderDays] = useState(7);
+  const [reminderOpen, setReminderOpen] = useState(false);
 
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testOk, setTestOk] = useState<boolean | null>(null);
   const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [testingWebhook, setTestingWebhook] = useState(false);
+  const [webhookTestOk, setWebhookTestOk] = useState<boolean | null>(null);
+  const [webhookTestMsg, setWebhookTestMsg] = useState<string | null>(null);
 
   useEffect(() => {
     getSettings()
@@ -53,8 +67,15 @@ export function FeishuCalendarTool() {
         setLarkPath(s.feishu_lark_cli_path ?? "");
         setAppToken(s.feishu_app_token ?? "");
         setTableId(s.feishu_cases_table_id ?? "");
+        setReminderEnabled(s.feishu_reminder_enabled === true);
+        setWebhookUrl(s.feishu_webhook_url ?? "");
+        setReminderTime(s.feishu_reminder_time ?? "09:00");
+        setReminderDays(s.feishu_reminder_days ?? 7);
         if ((s.feishu_app_token ?? "").trim() || (s.feishu_cases_table_id ?? "").trim()) {
           setPoolOpen(true);
+        }
+        if (s.feishu_reminder_enabled === true || (s.feishu_webhook_url ?? "").trim()) {
+          setReminderOpen(true);
         }
       })
       .catch(() => {});
@@ -64,6 +85,11 @@ export function FeishuCalendarTool() {
 
   const handleSave = async () => {
     if (!settings) return;
+    if (reminderEnabled && !webhookUrl.trim()) {
+      toast("启用飞书手机提醒前，请先填写机器人 Webhook URL", "error");
+      setReminderOpen(true);
+      return;
+    }
     setSaving(true);
     try {
       const next: Settings = {
@@ -72,11 +98,15 @@ export function FeishuCalendarTool() {
         feishu_lark_cli_path: larkPath.trim() || null,
         feishu_app_token: appToken.trim() || null,
         feishu_cases_table_id: tableId.trim() || null,
+        feishu_reminder_enabled: reminderEnabled,
+        feishu_webhook_url: webhookUrl.trim() || null,
+        feishu_reminder_time: reminderTime,
+        feishu_reminder_days: reminderDays,
       };
       await saveSettings(next);
       setSettings(next);
       setDirty(false);
-      toast("飞书日历配置已保存", "info");
+      toast("飞书联动配置已保存", "info");
     } catch (e) {
       toast(`保存失败:${e}`, "error");
     } finally {
@@ -84,8 +114,30 @@ export function FeishuCalendarTool() {
     }
   };
 
+  const handleTestWebhook = async () => {
+    if (!webhookUrl.trim()) return;
+    setTestingWebhook(true);
+    setWebhookTestOk(null);
+    setWebhookTestMsg(null);
+    try {
+      await testFeishuWebhook(webhookUrl.trim());
+      setWebhookTestOk(true);
+      setWebhookTestMsg("测试消息已发送，请在飞书手机端查看");
+    } catch (e) {
+      setWebhookTestOk(false);
+      setWebhookTestMsg(String(e));
+    } finally {
+      setTestingWebhook(false);
+    }
+  };
+
   // 测试连接:先存当前配置,再拉今天的飞书日历(透传真实错误,守坑#8)。
   const handleTest = async () => {
+    if (reminderEnabled && !webhookUrl.trim()) {
+      toast("启用飞书手机提醒前，请先填写机器人 Webhook URL", "error");
+      setReminderOpen(true);
+      return;
+    }
     setTesting(true);
     setTestOk(null);
     setTestMsg(null);
@@ -97,6 +149,10 @@ export function FeishuCalendarTool() {
           feishu_lark_cli_path: larkPath.trim() || null,
           feishu_app_token: appToken.trim() || null,
           feishu_cases_table_id: tableId.trim() || null,
+          feishu_reminder_enabled: reminderEnabled,
+          feishu_webhook_url: webhookUrl.trim() || null,
+          feishu_reminder_time: reminderTime,
+          feishu_reminder_days: reminderDays,
         };
         await saveSettings(next);
         setSettings(next);
@@ -120,24 +176,22 @@ export function FeishuCalendarTool() {
       {/* 标题 */}
       <div className="flex items-center gap-2">
         <CalendarClock className="size-5 text-foreground" />
-        <h3 className="text-base font-semibold text-foreground">飞书日历</h3>
+        <h3 className="text-base font-semibold text-foreground">飞书联动</h3>
       </div>
 
-      {/* 依赖说明(淡蓝,诚实标明门槛) */}
+      {/* 两类联动的依赖说明 */}
       <div className="rounded-lg bg-sky-50 px-4 py-3 text-sm text-slate-700">
-        <p className="font-medium text-slate-800">用前先准备:</p>
+        <p className="font-medium text-slate-800">两项能力可独立使用:</p>
         <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-[13px] leading-relaxed">
           <li>
-            本机安装飞书官方 <code className="rounded bg-white px-1">lark-cli</code> 并登录
-            (<code className="rounded bg-white px-1">lark-cli login</code>);CaseBoard 只复用它的登录态,不保存你的飞书 token。
+            <b>日历读取</b>:本机安装飞书官方 <code className="rounded bg-white px-1">lark-cli</code> 并登录
+            (<code className="rounded bg-white px-1">lark-cli login</code>)；CaseBoard 不保存飞书 token。
           </li>
           <li>
-            macOS 自动找 Homebrew 路径;<b>Windows / Linux</b> 需把 lark-cli 加入系统 PATH,
-            或在下方填它的<b>完整路径</b>。
+            <b>手机提醒</b>:在飞书群添加自定义机器人，把 Webhook URL 填到下方；不需要安装 lark-cli。
           </li>
           <li>
-            日历数据来自你<b>飞书日历应用</b>里的日程。开启并测试成功后,首页会用飞书月历
-            替代本地「日程日历」卡片。
+            macOS 会自动找 Homebrew 下的 lark-cli；<b>Windows / Linux</b> 可使用 PATH 或填写完整路径。
           </li>
         </ol>
       </div>
@@ -174,6 +228,104 @@ export function FeishuCalendarTool() {
           placeholder="留空 = 自动查找。Windows 示例:C:\\Tools\\lark-cli.exe"
           className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
         />
+      </div>
+
+      {/* 飞书手机每日提醒（与日历读取独立，可单独使用） */}
+      <div className="rounded-lg border border-border">
+        <button
+          type="button"
+          onClick={() => setReminderOpen((value) => !value)}
+          className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-medium text-foreground"
+        >
+          {reminderOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+          <BellRing className="size-4 text-blue-600" />
+          手机每日提醒
+          <span className="text-xs font-normal text-muted-foreground">(可选 · 飞书群机器人 Webhook)</span>
+        </button>
+        {reminderOpen && (
+          <div className="space-y-3 border-t border-border px-4 py-3">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              App 运行时会在设定时间，把未来到期的案件关键日期、未完成待办、时间线事件和个人日程
+              发到飞书群，手机端会收到飞书通知。消息包含案件名称和事项内容；不用时保持关闭即可。
+            </p>
+            <label className="flex cursor-pointer items-center gap-3 rounded-md bg-muted/30 px-3 py-2.5">
+              <input
+                type="checkbox"
+                checked={reminderEnabled}
+                onChange={(event) => {
+                  setReminderEnabled(event.target.checked);
+                  markDirty();
+                }}
+                className="size-4"
+              />
+              <div>
+                <p className="text-sm font-medium text-foreground">启用每日提醒</p>
+                <p className="text-xs text-muted-foreground">默认关闭；每天成功推送一次，App 重启不会重复发送</p>
+              </div>
+            </label>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-foreground">飞书机器人 Webhook URL</label>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={webhookUrl}
+                  onChange={(event) => {
+                    setWebhookUrl(event.target.value);
+                    setWebhookTestOk(null);
+                    setWebhookTestMsg(null);
+                    markDirty();
+                  }}
+                  placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+                  autoComplete="off"
+                  className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
+                />
+                <button
+                  type="button"
+                  onClick={handleTestWebhook}
+                  disabled={testingWebhook || !webhookUrl.trim()}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+                >
+                  {testingWebhook ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+                  测试提醒
+                </button>
+              </div>
+              {webhookTestMsg && (
+                <p className={webhookTestOk ? "text-xs text-emerald-700" : "text-xs text-red-700"}>
+                  {webhookTestOk ? "✓ " : "✕ "}{webhookTestMsg}
+                </p>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-foreground">每日推送时间</label>
+                <input
+                  type="time"
+                  value={reminderTime}
+                  onChange={(event) => {
+                    setReminderTime(event.target.value || "09:00");
+                    markDirty();
+                  }}
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-foreground">提前提醒天数</label>
+                <select
+                  value={reminderDays}
+                  onChange={(event) => {
+                    setReminderDays(Number(event.target.value));
+                    markDirty();
+                  }}
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
+                >
+                  {[1, 3, 5, 7, 14, 30].map((days) => (
+                    <option key={days} value={days}>{days} 天</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 案件池配置(可选折叠) */}
@@ -245,16 +397,16 @@ export function FeishuCalendarTool() {
         <button
           type="button"
           onClick={handleTest}
-          disabled={testing || saving}
+          disabled={testing || saving || testingWebhook}
           className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50"
         >
           {testing ? <Loader2 className="size-4 animate-spin" /> : <CalendarClock className="size-4" />}
-          测试连接
+          测试日历连接
         </button>
         <button
           type="button"
           onClick={handleSave}
-          disabled={saving || testing || !dirty}
+          disabled={saving || testing || testingWebhook || !dirty}
           className="inline-flex items-center gap-1.5 rounded-md bg-foreground px-3 py-2 text-sm font-medium text-background transition-colors hover:bg-foreground/90 disabled:opacity-50"
         >
           {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}

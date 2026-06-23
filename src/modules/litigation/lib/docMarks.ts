@@ -13,6 +13,7 @@ export const CATEGORIES = [
   "法院文书",
   "对方材料",
   "程序文书",
+  "参考材料",
   "其他",
 ] as const;
 export const UNCATEGORIZED = "未分类";

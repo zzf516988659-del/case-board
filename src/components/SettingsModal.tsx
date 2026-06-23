@@ -57,7 +57,12 @@ import {
 } from "@/lib/api";
 import type { Settings, McpServerConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { FEATURE_FLAGS, useFeatureFlag } from "@/lib/featureFlags";
+import {
+  FEATURE_FLAGS,
+  getFeatureFlag,
+  setFeatureFlag,
+  type FeatureFlagName,
+} from "@/lib/featureFlags";
 import { FONT_SCALE, useFontScale } from "@/lib/uiScale";
 
 type VerifyStatus = "idle" | "verifying" | "ok" | "fail";
@@ -244,6 +249,18 @@ export function SettingsModal({
   const [saved, setSaved] = useState(false); // page 模式下保存成功显示 toast(modal 模式直接关闭)
   // 2026-05-25 V0.1.8 · 是否有未保存改动(page 模式上报给父组件做切 tab 防呆)
   const [dirty, setDirty] = useState(false);
+  // 设置页里的界面开关先暂存，跟后端设置一起在「保存」时落盘。
+  // 不能直接用 useFeatureFlag：它会绕过本页 dirty 状态并立即写 localStorage。
+  const [featureFlagDraft, setFeatureFlagDraft] = useState<
+    Partial<Record<FeatureFlagName, boolean>>
+  >(() =>
+    Object.fromEntries(
+      FEATURE_FLAGS.filter((flag) => flag.location === "settings").map((flag) => [
+        flag.name,
+        getFeatureFlag(flag.name),
+      ]),
+    ),
+  );
   // 2026-06-16 · 设置页内部标签页。默认「通用」(作者要求点开设置先看通用);
   // 导入缺 LLM key 跳设置时父组件传 initialTab="brain" 深链到大脑(a92ae91 校验的是 LLM key)。
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
@@ -572,6 +589,9 @@ export function SettingsModal({
     setError(null);
     try {
       await saveSettings(prepareSettingsForSave(settings));
+      for (const [name, value] of Object.entries(featureFlagDraft)) {
+        setFeatureFlag(name as FeatureFlagName, value);
+      }
       setDirty(false);
       // 2026-05-27 · 两种模式都要通知父组件 settings 已经变了,父组件据此重判依赖项
       // (如 DeepSeek 余额 chip 是否显示)。修复同事场景:onboarding 选"稍后再配置"
@@ -596,6 +616,11 @@ export function SettingsModal({
 
   function updateField<K extends keyof Settings>(key: K, value: Settings[K]) {
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+    setDirty(true);
+  }
+
+  function updateFeatureFlag(name: FeatureFlagName, value: boolean) {
+    setFeatureFlagDraft((previous) => ({ ...previous, [name]: value }));
     setDirty(true);
   }
 
@@ -739,7 +764,6 @@ export function SettingsModal({
                   <Section
                     title="首页日程日历(可选)"
                     desc="把开庭/续封、带日期的待办、手动提醒汇总到首页日历;默认关闭,想体验就开,随时可关。"
-                    fill
                   >
                     <label className="flex items-center justify-between gap-3">
                       <span className="text-xs text-muted-foreground">
@@ -1452,7 +1476,12 @@ export function SettingsModal({
                   字段(ocr_provider/llm_provider/ollama_*)保留在后端/types,以后接新本地模型再恢复 UI。 */}
 
               {/* ── 功能开关:首页清爽开关(featureFlags)── */}
-              {tab === "toggles" && <FeatureFlagsCard />}
+              {tab === "toggles" && (
+                <FeatureFlagsCard
+                  values={featureFlagDraft}
+                  onChange={updateFeatureFlag}
+                />
+              )}
 
               {/* ── 数据源:外部工具(MCP)白名单(企查查/万得/北大法宝 等远程 HTTP)──
                   整宽,AI 助手消费外部 MCP server 工具 */}
@@ -1663,7 +1692,13 @@ function Field({
  * 以后首页新增模块 → 在 src/lib/featureFlags.ts 的 FEATURE_FLAGS 加一条,这里自动出现开关。
  * 只渲染 location==="settings" 的开关;location==="feature" 的(如滴答待办)由对应功能页自己放。
  */
-function FeatureFlagsCard() {
+function FeatureFlagsCard({
+  values,
+  onChange,
+}: {
+  values: Partial<Record<FeatureFlagName, boolean>>;
+  onChange: (name: FeatureFlagName, value: boolean) => void;
+}) {
   const flags = FEATURE_FLAGS.filter((f) => f.location === "settings");
   if (flags.length === 0) return null;
   return (
@@ -1673,7 +1708,12 @@ function FeatureFlagsCard() {
     >
       <div className="space-y-1">
         {flags.map((f) => (
-          <FeatureFlagToggle key={f.name} name={f.name} />
+          <FeatureFlagToggle
+            key={f.name}
+            name={f.name}
+            on={values[f.name] ?? f.defaultValue}
+            onChange={onChange}
+          />
         ))}
       </div>
     </Section>
@@ -1682,10 +1722,13 @@ function FeatureFlagsCard() {
 
 function FeatureFlagToggle({
   name,
+  on,
+  onChange,
 }: {
   name: (typeof FEATURE_FLAGS)[number]["name"];
+  on: boolean;
+  onChange: (name: FeatureFlagName, value: boolean) => void;
 }) {
-  const [on, setOn] = useFeatureFlag(name);
   const meta = FEATURE_FLAGS.find((f) => f.name === name)!;
   return (
     <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-background/50 p-3">
@@ -1700,7 +1743,7 @@ function FeatureFlagToggle({
         role="switch"
         aria-checked={on}
         aria-label={meta.title}
-        onClick={() => setOn(!on)}
+        onClick={() => onChange(name, !on)}
         className={cn(
           "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
           on ? "bg-sky-600" : "bg-muted",

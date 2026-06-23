@@ -20,7 +20,10 @@ const CHANGE_EVENT = "caseboard:feature-change";
 export type FeatureFlagName =
   | "home_filter_bar"
   | "home_ticktick"
-  | "case_court_filing";
+  | "case_court_filing"
+  | "case_todos"
+  | "case_work_logs"
+  | "reference_materials";
 
 export interface FeatureFlagMeta {
   name: FeatureFlagName;
@@ -58,6 +61,30 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
       "在案件详情页底部显示「辅助在线立案」区(实验性,依赖本机 Python 运行时)。默认关闭,保持详情页清爽;需要时在此打开。",
     defaultValue: false,
     location: "feature",
+  },
+  {
+    name: "case_todos",
+    title: "案件待办清单",
+    description:
+      "开启后在案件详情显示待办清单，可设置日期并汇总到首页。",
+    defaultValue: false,
+    location: "settings",
+  },
+  {
+    name: "case_work_logs",
+    title: "案件工作记录",
+    description:
+      "开启后在案件详情显示工作记录，可直接保存，或选择由 AI 整理后保存。",
+    defaultValue: false,
+    location: "settings",
+  },
+  {
+    name: "reference_materials",
+    title: "参考材料自动识别",
+    description:
+      "开启后识别参考材料、参考案例等文件夹，默认不纳入本案事实分析。",
+    defaultValue: false,
+    location: "settings",
   },
 ];
 

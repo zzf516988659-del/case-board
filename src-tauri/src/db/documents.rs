@@ -67,6 +67,8 @@ pub struct SyncStats {
     pub unchanged: usize,
     /// 源文件夹里不存在了,本次标 deleted_at
     pub deleted: usize,
+    /// 路径变化但文件身份唯一可确认；复用原文档行与抽取缓存
+    pub moved: usize,
 }
 
 /// 把一次扫描的所有结果同步到 DB(2026-05-23 晚十 重写,**不再 DELETE+INSERT 全表**)。
@@ -85,7 +87,7 @@ pub async fn replace_documents_for_case(
 ) -> Result<usize, sqlx::Error> {
     let stats = sync_documents_for_case(pool, case_id, scanned).await?;
     // 兼容老 caller(返回总数 = 该案件最终活跃文档数)
-    Ok(stats.added + stats.updated + stats.unchanged)
+    Ok(stats.added + stats.updated + stats.unchanged + stats.moved)
 }
 
 /// 2026-05-23 晚十 加 — 真正的 diff sync,返回详细统计。
@@ -104,8 +106,17 @@ pub async fn sync_documents_for_case(
     //   b) 软删环节会把 chat artifact 当"扫不到的文件"误标 deleted_at
     // 修法:existing 包含全部活跃行(避免 INSERT 撞),但**软删时只动 source='scan'**
     //      (chat / llm_extract artifact 不在源文件夹,本来就不该被 sync 影响)。
-    let existing: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT id, source_path, cache_key, source FROM documents \
+    type ExistingRow = (
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+    let existing: Vec<ExistingRow> = sqlx::query_as(
+        "SELECT id, source_path, filename, size_bytes, modified_at, cache_key, source FROM documents \
          WHERE case_id = ? AND deleted_at IS NULL",
     )
     .bind(case_id)
@@ -115,12 +126,50 @@ pub async fn sync_documents_for_case(
     // 索引:source_path → (id, old_cache_key, source)
     let mut existing_map: std::collections::HashMap<String, (String, Option<String>, String)> =
         std::collections::HashMap::with_capacity(existing.len());
-    for (id, sp, ck, src) in existing {
-        existing_map.insert(sp, (id, ck, src));
+    for (id, sp, _filename, _size, _mtime, ck, src) in &existing {
+        existing_map.insert(sp.clone(), (id.clone(), ck.clone(), src.clone()));
+    }
+
+    // 路径没命中时，按「文件名 + 大小 + 修改时间」做保守的一对一移动识别。
+    // 两侧任一出现重复候选就不猜，宁可按新增/删除重抽，也不把缓存绑错文件。
+    type MoveKey = (String, i64, Option<String>);
+    let mut old_candidates: std::collections::HashMap<MoveKey, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    for (id, path, filename, size, mtime, _cache_key, source) in &existing {
+        if source == "scan" && !scanned.iter().any(|doc| doc.source_path == *path) {
+            old_candidates
+                .entry((filename.clone(), *size, mtime.clone()))
+                .or_default()
+                .push((id.clone(), path.clone()));
+        }
+    }
+    let mut new_candidates: std::collections::HashMap<MoveKey, Vec<String>> =
+        std::collections::HashMap::new();
+    for doc in scanned {
+        if !existing_map.contains_key(&doc.source_path) {
+            new_candidates
+                .entry((
+                    doc.filename.clone(),
+                    doc.size_bytes as i64,
+                    doc.modified_at.clone(),
+                ))
+                .or_default()
+                .push(doc.source_path.clone());
+        }
+    }
+    let mut moved_by_new_path: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    for (key, new_paths) in &new_candidates {
+        if new_paths.len() == 1 {
+            if let Some(old_rows) = old_candidates.get(key).filter(|rows| rows.len() == 1) {
+                moved_by_new_path.insert(new_paths[0].clone(), old_rows[0].clone());
+            }
+        }
     }
 
     // 当前扫到的 source_path 集合(用于检测 deleted)
     let mut current_paths = std::collections::HashSet::with_capacity(scanned.len());
+    let mut moved_old_paths = std::collections::HashSet::new();
     let mut stats = SyncStats::default();
 
     // 2) 遍历当前扫到的文件,upsert
@@ -168,6 +217,27 @@ pub async fn sync_documents_for_case(
                 stats.updated += 1;
             }
             None => {
+                if let Some((existing_id, old_path)) = moved_by_new_path.get(&doc.source_path) {
+                    sqlx::query(
+                        "UPDATE documents SET source_path = ?, filename = ?, stage = ?, category = ?, \
+                         is_ai_artifact = ?, size_bytes = ?, modified_at = ?, cache_key = ?, \
+                         deleted_at = NULL WHERE id = ?",
+                    )
+                    .bind(&doc.source_path)
+                    .bind(&doc.filename)
+                    .bind(&doc.stage)
+                    .bind(&doc.category)
+                    .bind(doc.is_ai_artifact)
+                    .bind(doc.size_bytes as i64)
+                    .bind(&doc.modified_at)
+                    .bind(&new_cache_key)
+                    .bind(existing_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    moved_old_paths.insert(old_path.clone());
+                    stats.moved += 1;
+                    continue;
+                }
                 // 全新
                 let id = Uuid::new_v4().to_string();
                 sqlx::query(
@@ -197,7 +267,11 @@ pub async fn sync_documents_for_case(
     //    chat / llm_extract artifact 活在 app data 目录,不参与 scan-folder diff。
     let deleted_paths: Vec<String> = existing_map
         .iter()
-        .filter(|(p, (_, _, src))| !current_paths.contains(p.as_str()) && src == "scan")
+        .filter(|(p, (_, _, src))| {
+            !current_paths.contains(p.as_str())
+                && !moved_old_paths.contains(p.as_str())
+                && src == "scan"
+        })
         .map(|(p, _)| p.clone())
         .collect();
     for sp in &deleted_paths {

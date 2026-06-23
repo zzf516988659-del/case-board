@@ -16,6 +16,7 @@ pub mod global_extract;
 pub mod organize;
 pub mod prompts;
 pub mod providers;
+pub mod work_log;
 
 /// LLM 抽出的结构化字段(对应 documents.extracted_fields JSON)。
 ///

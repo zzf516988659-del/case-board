@@ -39,6 +39,7 @@ import { CaseTimeline } from "./CaseTimeline";
 import { EditableField } from "./EditableField";
 import { SortableCard } from "./SortableCard";
 import { TodosCard } from "@/components/TodosCard";
+import { CaseWorkLogSection } from "../CaseWorkLogSection";
 
 /**
  * 案件画像主视图。
@@ -58,12 +59,18 @@ export function CaseSnapshotView({
   documents,
   isEditMode = false,
   domain = "civil",
+  showTodos = false,
+  showWorkLogs = false,
+  onWorkLogSaved,
 }: {
   caseData: Case;
   documents: Document[];
   isEditMode?: boolean;
   /** 案件领域(2026-06-17)。"criminal" = 刑事 tab:部分标签按刑事适配(罪名/办案机关/被告人…)。 */
   domain?: "civil" | "criminal";
+  showTodos?: boolean;
+  showWorkLogs?: boolean;
+  onWorkLogSaved?: () => void;
 }) {
   // 刑事 tab 只做「标签级」适配(老板:先复刻框架 + 能做的轻适配,不深改字段管线)。
   const isCriminal = domain === "criminal";
@@ -215,7 +222,7 @@ export function CaseSnapshotView({
   /* ---------- 6 张卡片渲染器,按 ov.resolveOrder 顺序排版 ---------- */
   const defaultSectionOrder = [
     TITLES.BASIC,
-    TITLES.TODOS,
+    ...(showTodos || showWorkLogs ? [TITLES.TODOS] : []),
     // ≥2 个审级才显示历程卡(单审级时与基本信息重复);紧跟基本信息,最新审级在上
     ...(instances.length >= 2 ? [TITLES.INSTANCES] : []),
     TITLES.COURT,
@@ -275,21 +282,35 @@ export function CaseSnapshotView({
         </CardSection>
       ),
     },
-    {
-      id: TITLES.TODOS,
-      render: (dragHandle) => (
-        <CardSection
-          title={TITLES.TODOS}
-          subtitle="手动待办,打钩完成;首页「待办汇总」会汇总各案未完成项"
-          isEditMode={isEditMode}
-          hidden={ov.overrides.hidden_sections?.includes(TITLES.TODOS)}
-          onToggleHidden={() => ov.toggleHidden(TITLES.TODOS)}
-          dragHandle={dragHandle}
-        >
-          <TodosCard caseId={caseData.id} />
-        </CardSection>
-      ),
-    },
+    ...(showTodos || showWorkLogs
+      ? [
+          {
+            id: TITLES.TODOS,
+            render: (dragHandle?: DragHandleProps) => (
+              <div className="space-y-4">
+                {showTodos && (
+                  <CardSection
+                    title={TITLES.TODOS}
+                    subtitle="手动待办,打钩完成;首页「待办汇总」会汇总各案未完成项"
+                    isEditMode={isEditMode}
+                    hidden={ov.overrides.hidden_sections?.includes(TITLES.TODOS)}
+                    onToggleHidden={() => ov.toggleHidden(TITLES.TODOS)}
+                    dragHandle={dragHandle}
+                  >
+                    <TodosCard caseId={caseData.id} />
+                  </CardSection>
+                )}
+                {showWorkLogs && (
+                  <CaseWorkLogSection
+                    caseId={caseData.id}
+                    onSaved={onWorkLogSaved}
+                  />
+                )}
+              </div>
+            ),
+          },
+        ]
+      : []),
     {
       id: TITLES.COURT,
       render: (dragHandle) => (

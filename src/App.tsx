@@ -28,9 +28,11 @@ import type { InterestPrefill } from "@/modules/tools/calculators/InterestCalcul
 import { TeamModule } from "@/modules/team/TeamModule";
 import { ExecutionModule } from "@/modules/execution";
 import { CaseView } from "@/modules/litigation/components/CaseView";
+import { DetachedChatWindow } from "@/modules/litigation/components/chat/DetachedChatWindow";
 import { EmptyState } from "@/modules/litigation/components/EmptyState";
 import { ProgressBanner } from "@/modules/litigation/components/ProgressBanner";
 import { confirmDialog } from "@/lib/dialog";
+import { useFeatureFlag } from "@/lib/featureFlags";
 import {
   checkForUpdate,
   deleteCase,
@@ -44,6 +46,7 @@ import {
   findFeishuCasePath,
   openInDefaultApp,
   refreshCaseFiles,
+  relinkCaseFolder,
   revealInFinder,
   setDocumentDisplayName,
 } from "@/lib/api";
@@ -57,7 +60,40 @@ import {
 } from "@/lib/types";
 import { SplitImportDialog } from "@/components/SplitImportDialog";
 
+function readChatWindowParams(): {
+  caseId: string | null;
+  caseName: string | null;
+  domain: "civil" | "criminal";
+} | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("window") !== "chat") return null;
+    return {
+      caseId: params.get("caseId"),
+      caseName: params.get("caseName"),
+      domain: params.get("domain") === "criminal" ? "criminal" : "civil",
+    };
+  } catch {
+    return null;
+  }
+}
+
 function App() {
+  const chatWindow = readChatWindowParams();
+  if (chatWindow) {
+    return (
+      <DetachedChatWindow
+        caseId={chatWindow.caseId}
+        caseName={chatWindow.caseName}
+        domain={chatWindow.domain}
+      />
+    );
+  }
+
+  return <MainApp />;
+}
+
+function MainApp() {
   /** 全部已入库案件(按 updated_at 倒序) */
   const [cases, setCases] = useState<Case[]>([]);
   /** 当前选中案件 ID */
@@ -627,6 +663,16 @@ function App() {
       setViewerDoc(doc);
       return;
     }
+    const isOfficeDoc =
+      /\.(docx?|rtf|odt)$/i.test(doc.filename) ||
+      /wordprocessingml|msword|opendocument\.text|rtf/i.test(doc.mime_type ?? "");
+    if (isOfficeDoc) {
+      openInDefaultApp(doc.source_path).catch((e) => {
+        console.warn("open_in_default_app failed", e);
+        setError(String(e));
+      });
+      return;
+    }
     // 2026-05-31 · 抽取成功的文件(PDF/扫描件/docx 等)点击优先看「处理后的文本(MD)」
     // —— 这正是 AI 实际读到的内容,也方便核对抽取质量;原件仍可用行尾「在 Finder 打开」。
     // 见下方 MarkdownModal 的 previewExtractedPath 逻辑。
@@ -635,11 +681,9 @@ function App() {
     // App 内预览能力覆盖的文件类型:
     //   .md/.markdown/.txt   → react-markdown
     //   .html/.htm           → iframe sandbox
-    //   .docx/.doc/.rtf/.odt → macOS textutil 抽纯文本
+    //   .docx/.doc/.rtf/.odt → 上面已交给系统默认应用
     // 其他(.pdf/.png/...)原本走系统默认应用;现在抽取成功的也能 App 内看处理后文本。
-    const isPreviewable = /\.(md|markdown|html?|txt|docx?|rtf|odt)$/i.test(
-      doc.filename,
-    );
+    const isPreviewable = /\.(md|markdown|html?|txt)$/i.test(doc.filename);
     if (hasExtracted || isPreviewable) {
       setPreviewDoc(doc);
       return;
@@ -807,6 +851,40 @@ function App() {
 
   /** 是否正在跑刷新源文件(disable 按钮防重复点) */
   const [refreshingFiles, setRefreshingFiles] = useState(false);
+  const [referenceMaterialsEnabled] = useFeatureFlag("reference_materials");
+
+  const handleRelinkCase = useCallback(async () => {
+    if (!selectedCase || refreshingFiles) return;
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "重新选择这个案件的源文件夹",
+    });
+    if (typeof selected !== "string") return;
+    setRefreshingFiles(true);
+    try {
+      const stats = await relinkCaseFolder(
+        selectedCase.id,
+        selected,
+        referenceMaterialsEnabled,
+      );
+      const fresh = await getCaseWithDocs(selectedCase.id);
+      setSelectedCase(fresh.case);
+      setDocuments(fresh.documents);
+      setCases((prev) => prev.map((c) => (c.id === fresh.case.id ? fresh.case : c)));
+      const parts = [`已重新关联`];
+      if (stats.moved > 0) parts.push(`识别移动 ${stats.moved}`);
+      if (stats.added > 0) parts.push(`新增 ${stats.added}`);
+      if (stats.updated > 0) parts.push(`更新 ${stats.updated}`);
+      if (stats.deleted > 0) parts.push(`移除 ${stats.deleted}`);
+      toast(parts.join(" · "), "success");
+      setError(null);
+    } catch (e) {
+      setError(`重新关联失败: ${e}`);
+    } finally {
+      setRefreshingFiles(false);
+    }
+  }, [selectedCase, refreshingFiles, referenceMaterialsEnabled]);
 
   /**
    * 2026-05-25 V0.1.5 「🔄 刷新源文件」处理函数。
@@ -819,9 +897,9 @@ function App() {
     if (!selectedCase || refreshingFiles) return;
     setRefreshingFiles(true);
     try {
-      const stats = await refreshCaseFiles(selectedCase.id);
+      const stats = await refreshCaseFiles(selectedCase.id, referenceMaterialsEnabled);
       const hasChange =
-        stats.added > 0 || stats.updated > 0 || stats.deleted > 0;
+        stats.added > 0 || stats.updated > 0 || stats.deleted > 0 || stats.moved > 0;
       if (!hasChange) {
         toast(`源文件夹无变化(${stats.unchanged} 份均最新)`, "info");
       } else {
@@ -829,7 +907,12 @@ function App() {
         if (stats.added > 0) parts.push(`新增 ${stats.added}`);
         if (stats.updated > 0) parts.push(`更新 ${stats.updated}`);
         if (stats.deleted > 0) parts.push(`移除 ${stats.deleted}`);
-        toast(`${parts.join(" · ")} · 后台抽取中`, "success");
+        if (stats.moved > 0) parts.push(`移动 ${stats.moved}`);
+        const needsAnalysis = stats.added > 0 || stats.updated > 0 || stats.deleted > 0;
+        toast(
+          `${parts.join(" · ")}${needsAnalysis ? " · 后台抽取中" : " · 无需重新分析"}`,
+          "success",
+        );
         // 立刻刷一次文档列表,让前端看到 deleted_at / pending 状态变化
         if (selectedId) {
           try {
@@ -846,7 +929,7 @@ function App() {
     } finally {
       setRefreshingFiles(false);
     }
-  }, [selectedCase, selectedId, refreshingFiles]);
+  }, [selectedCase, selectedId, refreshingFiles, referenceMaterialsEnabled]);
 
   /**
    * 2026-05-27 V0.1.13+ chat artifact 完成后的轻量 reload。
@@ -881,7 +964,12 @@ function App() {
         setDocuments(r.documents);
         if (docId) {
           const target = r.documents.find((d) => d.id === docId);
-          if (target) setEditingDoc(target);
+          if (
+            target &&
+            (target.source === "chat_artifact" || target.source === "chat")
+          ) {
+            setEditingDoc(target);
+          }
         }
       } catch {
         /* 不阻塞 */
@@ -964,6 +1052,7 @@ function App() {
     onToggleEditMode: () => setIsEditMode((v) => !v),
     onDeleteCase: handleDeleteCase,
     onRefreshFiles: handleRefreshFiles,
+    onRelinkCase: handleRelinkCase,
     refreshingFiles,
     onOpenReport: handleOpenReport,
     reportLoading,

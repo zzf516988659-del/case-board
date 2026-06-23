@@ -4,6 +4,7 @@ import {
   BookMarked,
   BookOpen,
   FolderSearch,
+  FolderSync,
   Loader2,
   Pencil,
   RefreshCw,
@@ -64,6 +65,7 @@ export function CaseView({
   onToggleEditMode,
   onDeleteCase,
   onRefreshFiles,
+  onRelinkCase,
   refreshingFiles,
   onOpenReport,
   reportLoading,
@@ -88,6 +90,7 @@ export function CaseView({
   onToggleEditMode: () => void;
   onDeleteCase: () => void;
   onRefreshFiles: () => void;
+  onRelinkCase: () => void;
   refreshingFiles: boolean;
   onOpenReport: () => void;
   reportLoading: boolean;
@@ -109,6 +112,8 @@ export function CaseView({
   const aiArtifacts = documents.filter((d) => d.is_ai_artifact);
   // 辅助在线立案默认隐藏(实验性 + 依赖本机 Python),在「在线立案」工具里开关
   const [showCourtFiling] = useFeatureFlag("case_court_filing");
+  const [showTodos] = useFeatureFlag("case_todos");
+  const [showWorkLogs] = useFeatureFlag("case_work_logs");
 
   // Phase 3:文档标记(重要/忽略 + 原被告)。按案件加载,标记后重载。
   const [tags, setTags] = useState<DocumentTag[]>([]);
@@ -447,6 +452,16 @@ export function CaseView({
             </button>
             <button
               type="button"
+              onClick={onRelinkCase}
+              disabled={!selectedCase || refreshingFiles || selectedCase?.source_folder === "__DEMO__"}
+              className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+              title="源文件夹被移动或改名后，重新选择位置并复用已分析材料"
+              aria-label="重新关联案件源文件夹"
+            >
+              <FolderSync className="size-4" />
+            </button>
+            <button
+              type="button"
               onClick={onDeleteCase}
               disabled={!selectedCase}
               className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-30"
@@ -508,6 +523,9 @@ export function CaseView({
                     documents={documents}
                     isEditMode={isEditMode}
                     domain={domain}
+                    showTodos={showTodos}
+                    showWorkLogs={showWorkLogs}
+                    onWorkLogSaved={onReloadCase}
                   />
 
                   {/* 原文件(默认折叠) */}

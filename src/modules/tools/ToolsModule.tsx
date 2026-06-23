@@ -27,6 +27,7 @@ import {
   CalendarClock,
   Car,
   Combine,
+  FileOutput,
   Gavel,
   Hash,
   ListChecks,
@@ -49,6 +50,7 @@ import { CourtSmsTool } from "./CourtSmsTool";
 import { CourierTool } from "./CourierTool";
 import { FeishuCalendarTool } from "./FeishuCalendarTool";
 import { CourtFilingTool } from "./CourtFilingTool";
+import { ElementConvertWorkbench } from "./ElementConvertWorkbench";
 import { TickTickPanel } from "@/components/TickTickPanel";
 import { LegalToolCard } from "./components/LegalToolCard";
 
@@ -66,7 +68,8 @@ type LegalToolId =
   | "courier"
   | "ticktick"
   | "feishu"
-  | "courtfiling";
+  | "courtfiling"
+  | "elementconvert";
 
 interface LegalTool {
   id: LegalToolId;
@@ -266,7 +269,7 @@ export function ToolsModule({
     );
   }
 
-  // ──────────── 飞书日历(独立于计算器,自带视图) ────────────
+  // ──────────── 飞书联动（日历 + 手机提醒） ────────────
   if (activeTool === "feishu") {
     return (
       <main className="flex h-full w-full flex-col bg-background">
@@ -280,7 +283,7 @@ export function ToolsModule({
             返回工具列表
           </button>
           <span className="text-muted-foreground/40">·</span>
-          <h2 className="text-sm font-medium text-foreground">飞书日历</h2>
+          <h2 className="text-sm font-medium text-foreground">飞书联动</h2>
         </header>
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="mx-auto max-w-3xl px-6 py-6">
@@ -314,6 +317,10 @@ export function ToolsModule({
         </div>
       </main>
     );
+  }
+
+  if (activeTool === "elementconvert") {
+    return <ElementConvertWorkbench onClose={() => setActiveTool(null)} />;
   }
 
   // ────────────────────────── 工具视图态 ──────────────────────────
@@ -427,8 +434,8 @@ export function ToolsModule({
               />
               <LegalToolCard
                 icon={CalendarClock}
-                title="飞书日历"
-                desc="复用本机 lark-cli 登录态拉飞书日历,开启后首页显示飞书月历;需先装并登录 lark-cli"
+                title="飞书联动"
+                desc="读取飞书日历，也可把案件待办和关键日期每天推送到飞书手机；两项均可独立开关"
                 onClick={() => setActiveTool("feishu")}
               />
             </div>
@@ -460,6 +467,12 @@ export function ToolsModule({
                 title="辅助在线立案(实验)"
                 desc="一张网自动填到预览页停、不自动提交;配置+律师档案在此,发起在案件详情页;需本机 Python 运行时"
                 onClick={() => setActiveTool("courtfiling")}
+              />
+              <LegalToolCard
+                icon={FileOutput}
+                title="要素式文书转换（Beta）"
+                desc="共同测试版：抽取要素、人工复核后生成 Word；结果必须由律师核对"
+                onClick={() => setActiveTool("elementconvert")}
               />
             </div>
           </section>
